@@ -3,13 +3,21 @@ import CoreLocation
 
 @MainActor
 final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+
     @Published var location: CLLocation?
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published var errorMessage: String?
 
+    /// Şu anda cihazdan konum ölçümü bekleniyor mu?
+    @Published var isLocating = false
+
     private let manager = CLLocationManager()
-    private var locationContinuation: CheckedContinuation<CLLocation, Error>?
-    private var authorizationContinuation: CheckedContinuation<Void, Error>?
+
+    // Aynı anda birden fazla yer konum bekleyebilir (açılıştaki tazeleme +
+    // kullanıcının bastığı arama gibi). Hepsi tek ölçümü paylaşır ve
+    // ölçüm gelince hep birlikte devam eder.
+    private var locationWaiters: [CheckedContinuation<CLLocation, Error>] = []
+    private var authorizationWaiters: [CheckedContinuation<Void, Error>] = []
 
     override init() {
         super.init()
@@ -18,31 +26,35 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         authorizationStatus = manager.authorizationStatus
     }
 
-    /// Her çağrıda cihazdan yeni bir tek-seferlik konum ölçümü ister.
-    /// Eski kayıtlı koordinatı doğrudan döndürmez.
+    /// Cihazdan güncel konumu ister.
+    /// Halihazırda bir ölçüm sürüyorsa hata vermez; o ölçümü BEKLER.
     func requestCurrentLocation() async throws -> CLLocation {
+
         try await ensureAuthorization()
 
-        if locationContinuation != nil {
-            throw LocationError.requestAlreadyInProgress
-        }
-
         return try await withCheckedThrowingContinuation { continuation in
-            locationContinuation = continuation
+
+            locationWaiters.append(continuation)
+
+            // Ölçüm zaten sürüyorsa yenisini başlatma, sıraya gir.
+            guard !isLocating else { return }
+
+            isLocating = true
             manager.requestLocation()
         }
     }
 
-    /// Uygulama açılırken/öne gelirken mevcut konumu sessizce tazelemek için.
     @discardableResult
     func refreshCurrentLocation() async throws -> CLLocation {
         try await requestCurrentLocation()
     }
 
     private func ensureAuthorization() async throws {
+
         authorizationStatus = manager.authorizationStatus
 
         switch authorizationStatus {
+
         case .authorizedAlways, .authorizedWhenInUse:
             return
 
@@ -51,7 +63,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 
         case .notDetermined:
             try await withCheckedThrowingContinuation { continuation in
-                authorizationContinuation = continuation
+                authorizationWaiters.append(continuation)
                 manager.requestWhenInUseAuthorization()
             }
 
@@ -60,20 +72,39 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
+    private func finishLocation(_ result: Result<CLLocation, Error>) {
+
+        let waiters = locationWaiters
+        locationWaiters.removeAll()
+        isLocating = false
+
+        for waiter in waiters {
+            waiter.resume(with: result)
+        }
+    }
+
+    private func finishAuthorization(_ result: Result<Void, Error>) {
+
+        let waiters = authorizationWaiters
+        authorizationWaiters.removeAll()
+
+        for waiter in waiters {
+            waiter.resume(with: result)
+        }
+    }
+
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+
         authorizationStatus = manager.authorizationStatus
 
         switch authorizationStatus {
+
         case .authorizedAlways, .authorizedWhenInUse:
-            authorizationContinuation?.resume()
-            authorizationContinuation = nil
+            finishAuthorization(.success(()))
 
         case .denied, .restricted:
-            let error = LocationError.permissionDenied
-            authorizationContinuation?.resume(throwing: error)
-            authorizationContinuation = nil
-            locationContinuation?.resume(throwing: error)
-            locationContinuation = nil
+            finishAuthorization(.failure(LocationError.permissionDenied))
+            finishLocation(.failure(LocationError.permissionDenied))
 
         case .notDetermined:
             break
@@ -83,22 +114,37 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    func locationManager(
+        _ manager: CLLocationManager,
+        didUpdateLocations locations: [CLLocation]
+    ) {
         guard let latest = locations.last else { return }
+
         location = latest
         errorMessage = nil
-        locationContinuation?.resume(returning: latest)
-        locationContinuation = nil
+
+        finishLocation(.success(latest))
     }
 
-    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    func locationManager(
+        _ manager: CLLocationManager,
+        didFailWithError error: Error
+    ) {
         errorMessage = error.localizedDescription
-        locationContinuation?.resume(throwing: error)
-        locationContinuation = nil
+
+        // Elimizde daha önce alınmış bir konum varsa onu kullan,
+        // kullanıcıyı boş yere hataya düşürme.
+        if let location {
+            finishLocation(.success(location))
+        } else {
+            finishLocation(.failure(error))
+        }
     }
 }
 
+
 enum LocationError: LocalizedError {
+
     case permissionDenied
     case requestAlreadyInProgress
 
@@ -107,7 +153,7 @@ enum LocationError: LocalizedError {
         case .permissionDenied:
             return "Konum izni kapalı. Ayarlar > Gizlilik ve Güvenlik > Konum Servisleri bölümünden izin verin."
         case .requestAlreadyInProgress:
-            return "Konum güncelleniyor. Lütfen bir an sonra tekrar deneyin."
+            return "Konum güncelleniyor. Lütfen bekleyin."
         }
     }
 }

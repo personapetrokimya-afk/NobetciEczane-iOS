@@ -6,7 +6,15 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var locationManager = LocationManager()
     @State private var pharmacies: [Pharmacy] = []
-    @State private var isLoading = false
+    @State private var phase: SearchPhase = .idle
+
+    enum SearchPhase {
+        case idle       // bekliyor
+        case locating   // telefon konumu ölçülüyor
+        case searching  // nöbetçi eczaneler çekiliyor
+    }
+
+    private var isLoading: Bool { phase != .idle }
     @State private var errorMessage: String?
     @State private var hasSearched = false
     @State private var showPlaceSheet = false
@@ -34,9 +42,9 @@ struct ContentView: View {
             // Uygulama her açıldığında cihazdan güncel konum istenir.
             await refreshLocationOnEntry()
         }
-        .onChange(of: scenePhase) { phase in
+        .onChange(of: scenePhase) { newScenePhase in
             // Arka plandan tekrar uygulamaya gelindiğinde de konumu tazele.
-            if phase == .active {
+            if newScenePhase == .active {
                 Task { await refreshLocationOnEntry() }
             }
         }
@@ -90,9 +98,10 @@ struct ContentView: View {
             .disabled(isLoading)
             .accessibilityLabel("Yakındaki nöbetçi eczaneleri bul")
 
-            Text(isLoading ? "Nöbetçi eczaneler aranıyor…" : "Bulmak için dokun")
+            Text(statusText)
                 .font(.headline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(phase == .locating ? Color.green : Color.secondary)
+                .animation(.easeInOut(duration: 0.2), value: phase)
 
             Button {
                 showPlaceSheet = true
@@ -125,12 +134,19 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("Konumunuz yalnızca yakındaki nöbetçi eczaneleri bulmak için kullanılır.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 34)
-                .padding(.bottom, 18)
+            VStack(spacing: 6) {
+
+                Text("Konumunuz yalnızca yakındaki nöbetçi eczaneleri bulmak için kullanılır.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 34)
+
+                Text("Developed by D.Y.")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary.opacity(0.7))
+            }
+            .padding(.bottom, 18)
         }
         .padding()
     }
@@ -211,26 +227,49 @@ struct ContentView: View {
         }
     }
 
+    private var statusText: String {
+        switch phase {
+        case .idle:      return "Bulmak için dokun"
+        case .locating:  return "Konumunuz bulunuyor…"
+        case .searching: return "Nöbetçi eczaneler aranıyor…"
+        }
+    }
+
     private func search() {
-        guard !isLoading else { return }
-        isLoading = true
+
+        guard phase == .idle else { return }
+
         errorMessage = nil
+
+        // Önce konum. Konum tam olarak gelmeden arama BAŞLAMAZ.
+        phase = .locating
 
         Task {
             do {
-                // Butona her basıldığında da eski koordinatı kullanmak yerine yeniden ölç.
                 let location = try await locationManager.requestCurrentLocation()
+
+                // Konum yeni geldiyse il/ilçe rozetini de tazele.
+                if let place = await service.detectPlace(for: location) {
+                    await MainActor.run {
+                        detectedCity = place.city
+                        detectedDistrict = place.district
+                    }
+                }
+
+                await MainActor.run { phase = .searching }
+
                 let found = try await service.fetchNearest(to: location)
 
                 await MainActor.run {
                     pharmacies = found
                     hasSearched = true
-                    isLoading = false
+                    phase = .idle
                 }
+
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
-                    isLoading = false
+                    phase = .idle
                 }
             }
         }
