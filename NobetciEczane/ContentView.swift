@@ -2,6 +2,7 @@ import SwiftUI
 import MapKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var locationManager = LocationManager()
     @State private var pharmacies: [Pharmacy] = []
     @State private var isLoading = false
@@ -12,8 +13,12 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color.black, Color(red: 0.03, green: 0.10, blue: 0.09)], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
+            LinearGradient(
+                colors: [Color.black, Color(red: 0.03, green: 0.10, blue: 0.09)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
 
             if hasSearched && !pharmacies.isEmpty {
                 resultsView
@@ -21,7 +26,23 @@ struct ContentView: View {
                 homeView
             }
         }
-        .alert("Bilgi", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+        .task {
+            // Uygulama her açıldığında cihazdan güncel konum istenir.
+            await refreshLocationOnEntry()
+        }
+        .onChange(of: scenePhase) { phase in
+            // Arka plandan tekrar uygulamaya gelindiğinde de konumu tazele.
+            if phase == .active {
+                Task { await refreshLocationOnEntry() }
+            }
+        }
+        .alert(
+            "Bilgi",
+            isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )
+        ) {
             Button("Tamam", role: .cancel) { }
         } message: {
             Text(errorMessage ?? "")
@@ -31,6 +52,7 @@ struct ContentView: View {
     private var homeView: some View {
         VStack(spacing: 28) {
             Spacer()
+
             VStack(spacing: 8) {
                 Text("NÖBETÇİ")
                     .font(.system(size: 34, weight: .black, design: .rounded))
@@ -45,6 +67,7 @@ struct ContentView: View {
                     Circle().stroke(.green.opacity(0.30), lineWidth: 2).frame(width: 205, height: 205)
                     Circle().fill(.green.gradient).frame(width: 165, height: 165)
                         .shadow(color: .green.opacity(0.55), radius: 35)
+
                     if isLoading {
                         ProgressView().tint(.white).scaleEffect(1.6)
                     } else {
@@ -60,9 +83,14 @@ struct ContentView: View {
             Text(isLoading ? "Nöbetçi eczaneler aranıyor…" : "Bulmak için dokun")
                 .font(.headline)
                 .foregroundStyle(.secondary)
+
             Spacer()
+
             Text("Konumunuz yalnızca yakındaki nöbetçi eczaneleri bulmak için kullanılır.")
-                .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center).padding(.horizontal, 34)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 34)
                 .padding(.bottom, 18)
         }
         .padding()
@@ -76,18 +104,31 @@ struct ContentView: View {
                         Button { openMaps(pharmacy) } label: {
                             HStack(spacing: 14) {
                                 Image(systemName: "cross.case.fill")
-                                    .font(.title2).foregroundStyle(.green)
+                                    .font(.title2)
+                                    .foregroundStyle(.green)
                                     .frame(width: 42, height: 42)
                                     .background(.green.opacity(0.12), in: Circle())
+
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(pharmacy.name).font(.headline).foregroundStyle(.primary)
-                                    Text(pharmacy.address).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                    Text(pharmacy.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+
+                                    Text(pharmacy.address)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+
                                     if let distance = formattedDistance(pharmacy) {
-                                        Text(distance).font(.caption.weight(.semibold)).foregroundStyle(.green)
+                                        Text(distance)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.green)
                                     }
                                 }
+
                                 Spacer()
-                                Image(systemName: "arrow.triangle.turn.up.right.diamond.fill").foregroundStyle(.secondary)
+                                Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
+                                    .foregroundStyle(.secondary)
                             }
                             .padding(.vertical, 6)
                         }
@@ -102,19 +143,41 @@ struct ContentView: View {
                     Button("Yenile", action: search).disabled(isLoading)
                 }
                 ToolbarItem(placement: .topBarLeading) {
-                    Button { pharmacies = []; hasSearched = false } label: { Image(systemName: "xmark") }
+                    Button {
+                        pharmacies = []
+                        hasSearched = false
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
                 }
             }
         }
     }
 
+    private func refreshLocationOnEntry() async {
+        do {
+            _ = try await locationManager.refreshCurrentLocation()
+        } catch LocationError.requestAlreadyInProgress {
+            // .task ve scenePhase aynı anda tetiklenirse ikinci isteği sessizce geç.
+        } catch LocationError.permissionDenied {
+            // İzin mesajını kullanıcı arama butonuna bastığında da görecek.
+            // Açılışta arka arkaya uyarı göstermiyoruz.
+        } catch {
+            // Geçici GPS hatası aramayı engellemez; butona basınca yeniden denenir.
+        }
+    }
+
     private func search() {
+        guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
+
         Task {
             do {
+                // Butona her basıldığında da eski koordinatı kullanmak yerine yeniden ölç.
                 let location = try await locationManager.requestCurrentLocation()
                 let found = try await service.fetchNearest(to: location)
+
                 await MainActor.run {
                     pharmacies = found
                     hasSearched = true
@@ -130,20 +193,34 @@ struct ContentView: View {
     }
 
     private func formattedDistance(_ pharmacy: Pharmacy) -> String? {
-        guard let location = locationManager.location, let d = pharmacy.distance(from: location) else { return nil }
-        if d < 1000 { return "\(Int(d.rounded())) m" }
-        return String(format: "%.1f km", d / 1000)
+        guard let location = locationManager.location,
+              let distance = pharmacy.distance(from: location) else {
+            return nil
+        }
+
+        if distance < 1000 {
+            return "\(Int(distance.rounded())) m"
+        }
+        return String(format: "%.1f km", distance / 1000)
     }
 
     private func openMaps(_ pharmacy: Pharmacy) {
         if let lat = pharmacy.latitude, let lon = pharmacy.longitude {
-            let item = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon)))
+            let item = MKMapItem(
+                placemark: MKPlacemark(
+                    coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon)
+                )
+            )
             item.name = pharmacy.name
-            item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
+            item.openInMaps(
+                launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving]
+            )
             return
         }
 
-        let query = (pharmacy.name + " " + pharmacy.address).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let query = (pharmacy.name + " " + pharmacy.address)
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+
         if let url = URL(string: "http://maps.apple.com/?daddr=\(query)&dirflg=d") {
             UIApplication.shared.open(url)
         }
