@@ -25,28 +25,50 @@ workflows:
             CODE_SIGN_IDENTITY="" \
             clean build
 
+      - name: Fix Info.plist
+        script: |
+          set -e
+
+          APP_PATH="build/Build/Products/Release-iphoneos/NobetciEczane.app"
+          PLIST="$APP_PATH/Info.plist"
+
+          echo "Before fix:"
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST"
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :CFBundleExecutable string NobetciEczane" \
+            "$PLIST" || \
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleExecutable NobetciEczane" \
+            "$PLIST"
+
+          echo "After fix:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleExecutable" \
+            "$PLIST"
+
       - name: Verify app executable
         script: |
           set -e
 
           APP_PATH="build/Build/Products/Release-iphoneos/NobetciEczane.app"
+          PLIST="$APP_PATH/Info.plist"
 
-          echo "APP contents:"
-          ls -la "$APP_PATH"
-
-          EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+          EXECUTABLE=$(/usr/libexec/PlistBuddy \
+            -c "Print :CFBundleExecutable" \
+            "$PLIST")
 
           echo "CFBundleExecutable = $EXECUTABLE"
 
           if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
-            echo "ERROR: Executable not found:"
-            echo "$APP_PATH/$EXECUTABLE"
+            echo "ERROR: Executable not found!"
             exit 1
           fi
 
-          echo "Executable exists:"
-          ls -la "$APP_PATH/$EXECUTABLE"
+          echo "Executable found:"
+          ls -lh "$APP_PATH/$EXECUTABLE"
 
+          echo "Executable type:"
           file "$APP_PATH/$EXECUTABLE"
 
       - name: Package IPA
@@ -54,21 +76,20 @@ workflows:
           set -e
 
           rm -rf Payload
-          mkdir -p Payload
+          mkdir Payload
 
           cp -R \
             build/Build/Products/Release-iphoneos/NobetciEczane.app \
             Payload/
 
-          echo "Payload contents:"
-          find Payload -maxdepth 3 -type f -print
-
-          /usr/bin/zip -qry NobetciEczane-unsigned.ipa Payload
+          /usr/bin/zip -qry \
+            NobetciEczane-unsigned.ipa \
+            Payload
 
           echo "IPA created:"
           ls -lh NobetciEczane-unsigned.ipa
 
-          echo "IPA contents:"
+          echo "Checking IPA:"
           unzip -l NobetciEczane-unsigned.ipa | head -100
 
     artifacts:
