@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import UIKit
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -8,6 +9,7 @@ struct ContentView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var hasSearched = false
+    @State private var showCitySearch = false
 
     private let service = DutyPharmacyService()
 
@@ -47,6 +49,9 @@ struct ContentView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        .sheet(isPresented: $showCitySearch) {
+            CitySearchView()
+        }
     }
 
     private var homeView: some View {
@@ -84,6 +89,18 @@ struct ContentView: View {
                 .font(.headline)
                 .foregroundStyle(.secondary)
 
+            Button {
+                showCitySearch = true
+            } label: {
+                Label("Başka bir şehre bak", systemImage: "map")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.green)
+                    .padding(.vertical, 11)
+                    .padding(.horizontal, 20)
+                    .background(.green.opacity(0.12), in: Capsule())
+            }
+            .disabled(isLoading)
+
             Spacer()
 
             Text("Konumunuz yalnızca yakındaki nöbetçi eczaneleri bulmak için kullanılır.")
@@ -102,47 +119,22 @@ struct ContentView: View {
                 Section {
                     ForEach(pharmacies) { pharmacy in
                         Button { openMaps(pharmacy) } label: {
-                            HStack(spacing: 14) {
-                                Image(systemName: "cross.case.fill")
-                                    .font(.title2)
-                                    .foregroundStyle(.green)
-                                    .frame(width: 42, height: 42)
-                                    .background(.green.opacity(0.12), in: Circle())
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(pharmacy.name)
-                                        .font(.headline)
-                                        .foregroundStyle(.primary)
-
-                                    Text(pharmacy.address)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-
-                                    if let distance = formattedDistance(pharmacy) {
-                                        Text(distance)
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.green)
-                                    }
-                                }
-
-                                Spacer()
-                                Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 6)
+                            PharmacyRow(
+                                pharmacy: pharmacy,
+                                distanceText: formattedDistance(pharmacy)
+                            )
                         }
                     }
                 } header: {
-                    Text("En yakındaki nöbetçi eczaneler")
+                    Text("En yakından en uzağa · \(pharmacies.count) nöbetçi eczane")
                 }
             }
             .navigationTitle("Nöbetçi Eczaneler")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Yenile", action: search).disabled(isLoading)
                 }
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button {
                         pharmacies = []
                         hasSearched = false

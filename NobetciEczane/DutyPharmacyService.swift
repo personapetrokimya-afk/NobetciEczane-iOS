@@ -44,6 +44,11 @@ struct DutyPharmacyService {
 
     // MARK: - Public
 
+    /// Uygulamanın ana akışı:
+    /// 1. Telefonun güncel konumu alınır.
+    /// 2. Konumdan ŞEHİR belirlenir.
+    /// 3. O şehrin bugünkü nöbetçi listesi TÜM KAYNAKLARDAN paralel çekilip birleştirilir.
+    /// 4. Liste, telefona en yakın eczaneden en uzağa doğru sıralanıp döndürülür.
     func fetchNearest(to location: CLLocation) async throws -> [Pharmacy] {
 
         let placemark = try await reverseGeocode(location)
@@ -54,69 +59,50 @@ struct DutyPharmacyService {
         }
 
         let district = detectDistrict(from: placemark)
+        let citySlug = slug(city)
 
-        log("📍 Şehir: \(city) / İlçe: \(district ?? "-")")
+        log("📍 Şehir: \(city) (\(citySlug)) / İlçe: \(district ?? "-")")
 
-        var pharmacies: [Pharmacy] = []
-        var lastFailure: String?
-
-        // 1) Önce ilçe sayfası. En doğru ve en küçük liste burasıdır.
-        if let district, !district.isEmpty {
-            do {
-                pharmacies = try await loadPharmacies(
-                    city: city,
-                    district: district
-                )
-            } catch let error as ServiceError {
-                lastFailure = error.diagnosticText
-                log("ℹ️ İlçe sayfası kullanılamadı: \(error.diagnosticText)")
-            }
-        }
-
-        // 2) İlçe sayfası yoksa/boşsa il sayfasına düş ve ilçeye göre süz.
-        if pharmacies.isEmpty {
-            do {
-                let cityWide = try await loadPharmacies(
-                    city: city,
-                    district: nil
-                )
-
-                pharmacies = filter(
-                    cityWide,
-                    byDistrict: district
-                )
-
-                // İlçe eşleşmesi yoksa kullanıcıyı boş bırakmak yerine
-                // il genelindeki en yakın nöbetçileri göster.
-                if pharmacies.isEmpty {
-                    pharmacies = cityWide
-                }
-
-            } catch let error as ServiceError {
-                throw ServiceError.sourceUnavailable(
-                    detail: error.diagnosticText
-                        + (lastFailure.map { " | İlçe: \($0)" } ?? "")
-                )
-            }
-        }
-
-        guard !pharmacies.isEmpty else {
-            throw ServiceError.noDutyPharmacyFound
-        }
-
-        // Koordinatı olmayan kayıtları (sınırlı sayıda) adresten tamamla.
-        pharmacies = await enrichMissingCoordinates(
-            pharmacies,
-            city: city
+        // Şehrin TAMAMI taranır; ilçeye göre daraltma yapılmaz.
+        var result = await fetchCrossChecked(
+            citySlug: citySlug,
+            districtSlug: nil,
+            districtName: nil
         )
 
-        return sort(pharmacies, around: location)
+        // Hiçbir kaynak il sayfasını veremediyse ilçe sayfalarına düşülür.
+        if result.isEmpty,
+           let district,
+           !district.isEmpty {
+
+            result = await fetchCrossChecked(
+                citySlug: citySlug,
+                districtSlug: slug(district),
+                districtName: district
+            )
+        }
+
+        guard !result.isEmpty else {
+            throw ServiceError.sourceUnavailable(
+                detail: result.failures.isEmpty
+                    ? "tüm kaynaklar boş döndü"
+                    : result.failures.joined(separator: " | ")
+            )
+        }
+
+        log("✅ Kaynaklar: \(result.succeeded.joined(separator: ", ")) — \(result.pharmacies.count) kayıt")
+
+        // Koordinatı hiçbir kaynaktan çıkmayan kayıtlar adresten tamamlanır.
+        let enriched = await enrichMissingCoordinates(result.pharmacies, city: city)
+
+        // En yakından en uzağa.
+        return sort(enriched, around: location)
     }
 
 
     // MARK: - Loading
 
-    private func loadPharmacies(
+    func loadPharmacies(
         city: String,
         district: String?
     ) async throws -> [Pharmacy] {
@@ -161,7 +147,7 @@ struct DutyPharmacyService {
 
 
     /// Aynı sayfa için denenecek adresler. İlki başarısızsa sıradaki denenir.
-    private func candidateURLs(
+    func candidateURLs(
         city: String,
         district: String?
     ) -> [URL] {
@@ -199,7 +185,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func fetchHTML(from url: URL) async throws -> String {
+    func fetchHTML(from url: URL) async throws -> String {
 
         var lastDetail = "bilinmiyor"
 
@@ -269,7 +255,7 @@ struct DutyPharmacyService {
 
     /// Sayfada 3 güne ait nöbet listesi bulunur.
     /// Yalnızca ilk (bugünkü) listeyi almazsak yarınki eczaneleri de gösteririz.
-    private func extractTodaySection(from html: String) -> String {
+    func extractTodaySection(from html: String) -> String {
 
         let tableRanges = ranges(of: #"(?is)<table\b"#, in: html)
 
@@ -298,7 +284,7 @@ struct DutyPharmacyService {
 
     // MARK: - Tablo tabanlı parser (birincil)
 
-    private func parseTableRows(
+    func parseTableRows(
         from html: String,
         fallbackDistrict: String?
     ) -> [Pharmacy] {
@@ -354,7 +340,7 @@ struct DutyPharmacyService {
 
     // MARK: - Yedek parser (tablo bulunamazsa)
 
-    private func parseGenericBlocks(
+    func parseGenericBlocks(
         from html: String,
         fallbackDistrict: String?
     ) -> [Pharmacy] {
@@ -403,7 +389,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func extractName(_ raw: String, text: String) -> String? {
+    func extractName(_ raw: String, text: String) -> String? {
 
         let patterns = [
             #"(?is)<h1[^>]*>(.*?)</h1>"#,
@@ -437,7 +423,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func extractAddress(
+    func extractAddress(
         _ raw: String,
         text: String,
         name: String
@@ -465,7 +451,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func cleanAddress(_ value: String) -> String {
+    func cleanAddress(_ value: String) -> String {
 
         var text = value
 
@@ -490,7 +476,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func isPossiblePharmacyName(_ value: String) -> Bool {
+    func isPossiblePharmacyName(_ value: String) -> Bool {
 
         let normalizedValue = normalize(value)
 
@@ -517,7 +503,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func cleanPharmacyName(_ value: String) -> String {
+    func cleanPharmacyName(_ value: String) -> String {
 
         value
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -525,7 +511,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func extractPhone(_ raw: String) -> String? {
+    func extractPhone(_ raw: String) -> String? {
 
         let patterns = [
             #"(?i)tel:\s*([+0-9\s\(\)\-]{10,20})"#,
@@ -547,7 +533,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func extractDistrict(_ raw: String, text: String) -> String? {
+    func extractDistrict(_ raw: String, text: String) -> String? {
 
         if let match = firstMatch(
             #"(?is)<a[^>]+href=["'][^"']*nobetci-[a-z0-9\-]+-([a-z0-9\-]+)["']"#,
@@ -568,7 +554,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func extractCoordinates(_ text: String) -> (Double, Double)? {
+    func extractCoordinates(_ text: String) -> (Double, Double)? {
 
         let patterns = [
             #"(?i)(?:q=|query=|destination=|daddr=|ll=|center=)(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)"#,
@@ -591,14 +577,14 @@ struct DutyPharmacyService {
     }
 
 
-    private func isTurkeyCoordinate(latitude: Double, longitude: Double) -> Bool {
+    func isTurkeyCoordinate(latitude: Double, longitude: Double) -> Bool {
         (35.5...42.5).contains(latitude) && (25.5...45.0).contains(longitude)
     }
 
 
     // MARK: - District filter
 
-    private func filter(
+    func filter(
         _ pharmacies: [Pharmacy],
         byDistrict district: String?
     ) -> [Pharmacy] {
@@ -628,7 +614,7 @@ struct DutyPharmacyService {
 
     // MARK: - Location
 
-    private func reverseGeocode(_ location: CLLocation) async throws -> CLPlacemark {
+    func reverseGeocode(_ location: CLLocation) async throws -> CLPlacemark {
 
         let geocoder = CLGeocoder()
 
@@ -645,7 +631,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func detectCity(from placemark: CLPlacemark) -> String? {
+    func detectCity(from placemark: CLPlacemark) -> String? {
 
         if let value = placemark.administrativeArea,
            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -661,7 +647,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func detectDistrict(from placemark: CLPlacemark) -> String? {
+    func detectDistrict(from placemark: CLPlacemark) -> String? {
 
         let city = detectCity(from: placemark)
 
@@ -688,7 +674,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func cleanLocationName(_ value: String) -> String {
+    func cleanLocationName(_ value: String) -> String {
 
         value
             .replacingOccurrences(of: " İli", with: "", options: .caseInsensitive)
@@ -699,14 +685,14 @@ struct DutyPharmacyService {
 
     // MARK: - Coordinate enrichment
 
-    private func enrichMissingCoordinates(
+    func enrichMissingCoordinates(
         _ pharmacies: [Pharmacy],
         city: String
     ) async -> [Pharmacy] {
 
-        // CLGeocoder hız sınırlıdır. En fazla 10 kayıt için deneriz,
+        // CLGeocoder hız sınırlıdır. En fazla 20 kayıt için deneriz,
         // aksi halde uygulama dakikalarca "yükleniyor" durumunda kalır.
-        let limit = 10
+        let limit = 20
 
         var result: [Pharmacy] = []
         var geocoded = 0
@@ -747,7 +733,8 @@ struct DutyPharmacyService {
                             phone: pharmacy.phone,
                             latitude: coordinate.latitude,
                             longitude: coordinate.longitude,
-                            district: pharmacy.district
+                            district: pharmacy.district,
+                            sources: pharmacy.sources
                         )
                     )
                 } else {
@@ -767,7 +754,7 @@ struct DutyPharmacyService {
 
     // MARK: - Sorting / dedupe
 
-    private func sort(
+    func sort(
         _ pharmacies: [Pharmacy],
         around location: CLLocation
     ) -> [Pharmacy] {
@@ -780,7 +767,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func removeDuplicates(_ pharmacies: [Pharmacy]) -> [Pharmacy] {
+    func removeDuplicates(_ pharmacies: [Pharmacy]) -> [Pharmacy] {
 
         var seen = Set<String>()
 
@@ -792,7 +779,7 @@ struct DutyPharmacyService {
 
     // MARK: - Slug / normalize
 
-    private func slug(_ value: String) -> String {
+    func slug(_ value: String) -> String {
 
         var output = turkishLowercased(value)
 
@@ -811,7 +798,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func normalize(_ value: String) -> String {
+    func normalize(_ value: String) -> String {
 
         var output = turkishLowercased(value)
 
@@ -836,7 +823,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func turkishLowercased(_ value: String) -> String {
+    func turkishLowercased(_ value: String) -> String {
 
         var output = value.lowercased(with: Locale(identifier: "tr_TR"))
 
@@ -863,7 +850,7 @@ struct DutyPharmacyService {
 
     // MARK: - HTML helpers
 
-    private func cleanHTML(_ input: String) -> String {
+    func cleanHTML(_ input: String) -> String {
 
         var text = input
 
@@ -916,7 +903,7 @@ struct DutyPharmacyService {
 
     // MARK: - Regex helpers
 
-    private func regexMatches(_ pattern: String, in text: String) -> [String] {
+    func regexMatches(_ pattern: String, in text: String) -> [String] {
 
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return []
@@ -932,7 +919,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func firstMatch(_ pattern: String, in text: String) -> String? {
+    func firstMatch(_ pattern: String, in text: String) -> String? {
 
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(
@@ -949,7 +936,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func captureGroups(_ pattern: String, in text: String) -> [String]? {
+    func captureGroups(_ pattern: String, in text: String) -> [String]? {
 
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(
@@ -972,7 +959,7 @@ struct DutyPharmacyService {
     }
 
 
-    private func ranges(of pattern: String, in text: String) -> [Range<String.Index>] {
+    func ranges(of pattern: String, in text: String) -> [Range<String.Index>] {
 
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return []
@@ -984,10 +971,163 @@ struct DutyPharmacyService {
     }
 
 
-    private func log(_ message: String) {
+    func log(_ message: String) {
         #if DEBUG
         print(message)
         #endif
+    }
+}
+
+
+// MARK: - Manuel arama (konum olmadan, Türkiye geneli)
+
+extension DutyPharmacyService {
+
+    /// Seçilen ilin ilçe listesi. Uygulamaya gömülü liste yoktur;
+    /// il sayfasındaki `/nobetci-<il>-<ilce>` bağlantıları canlı okunur,
+    /// böylece ilçe adları/slug'ları sitede değişse bile güncel kalır.
+    func fetchDistricts(citySlug: String) async throws -> [District] {
+
+        var lastError: ServiceError = .sourceUnavailable(detail: "bilinmiyor")
+
+        for url in hostURLs(path: "nobetci-\(citySlug)") {
+
+            do {
+                let html = try await fetchHTML(from: url)
+
+                let districts = parseDistricts(from: html, citySlug: citySlug)
+
+                if !districts.isEmpty {
+                    return districts
+                }
+
+                lastError = .districtsNotFound
+
+            } catch let error as ServiceError {
+                lastError = error
+            }
+        }
+
+        throw lastError
+    }
+
+
+    /// Konum kullanmadan, doğrudan il (ve varsa ilçe) slug'ı ile
+    /// BUGÜNKÜ nöbetçi eczaneleri TÜM kaynaklardan getirir.
+    func fetchDuty(
+        citySlug: String,
+        districtSlug: String?,
+        districtName: String?
+    ) async throws -> [Pharmacy] {
+
+        let result = await fetchCrossChecked(
+            citySlug: citySlug,
+            districtSlug: districtSlug,
+            districtName: districtName
+        )
+
+        guard !result.isEmpty else {
+            throw ServiceError.sourceUnavailable(
+                detail: result.failures.isEmpty
+                    ? "tüm kaynaklar boş döndü"
+                    : result.failures.joined(separator: " | ")
+            )
+        }
+
+        // Bazı kaynaklar ilçe sayfası sunmadığı için il listesi döner;
+        // ilçe istendiyse burada süzülür.
+        if let districtName,
+           !districtName.isEmpty {
+
+            let narrowed = filter(result.pharmacies, byDistrict: districtName)
+
+            if !narrowed.isEmpty {
+                return narrowed
+            }
+        }
+
+        return result.pharmacies
+    }
+
+
+    func parseDistricts(
+        from html: String,
+        citySlug: String
+    ) -> [District] {
+
+        let pattern =
+            "(?is)<a[^>]+href=[\"'][^\"']*?/nobetci-"
+            + citySlug
+            + "-([a-z0-9\\-]+)[\"'][^>]*>(.*?)</a>"
+
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+
+        var seen = Set<String>()
+        var result: [District] = []
+
+        let range = NSRange(html.startIndex..., in: html)
+
+        for match in regex.matches(in: html, range: range) {
+
+            guard match.numberOfRanges >= 3,
+                  let slugRange = Range(match.range(at: 1), in: html)
+            else { continue }
+
+            let slug = String(html[slugRange])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-/"))
+
+            guard slug.count >= 2, seen.insert(slug).inserted else { continue }
+
+            var name = ""
+
+            if let textRange = Range(match.range(at: 2), in: html) {
+                name = cleanHTML(String(html[textRange]))
+                    .replacingOccurrences(of: "\n", with: " ")
+            }
+
+            for junk in [
+                "Nöbetçi Eczaneleri", "Nöbetçi Eczaneler",
+                "Nöbetçi Eczane", "Nöbetçi", "Eczaneleri", "Eczaneler"
+            ] {
+                name = name.replacingOccurrences(
+                    of: junk,
+                    with: " ",
+                    options: .caseInsensitive
+                )
+            }
+
+            name = name
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if name.count < 2 {
+                name = slug
+                    .split(separator: "-")
+                    .map { $0.capitalized }
+                    .joined(separator: " ")
+            }
+
+            result.append(District(name: name, slug: slug))
+        }
+
+        let collation = Locale(identifier: "tr_TR")
+
+        return result.sorted {
+            $0.name.compare($1.name, options: [.caseInsensitive], range: nil, locale: collation)
+                == .orderedAscending
+        }
+    }
+
+
+    func hostURLs(path: String) -> [URL] {
+
+        [
+            "https://www.eczaneler.gen.tr/\(path)",
+            "https://eczaneler.gen.tr/\(path)"
+        ]
+        .compactMap { URL(string: $0) }
     }
 }
 
@@ -1001,6 +1141,7 @@ enum ServiceError: LocalizedError {
     case sourceUnavailable(detail: String)
     case invalidResponse
     case noDutyPharmacyFound
+    case districtsNotFound
 
     var diagnosticText: String {
         switch self {
@@ -1009,6 +1150,7 @@ enum ServiceError: LocalizedError {
         case .sourceUnavailable(let detail): return detail
         case .invalidResponse:      return "yanıt okunamadı"
         case .noDutyPharmacyFound:  return "listede kayıt yok"
+        case .districtsNotFound:    return "ilçe listesi okunamadı"
         }
     }
 
@@ -1034,7 +1176,10 @@ enum ServiceError: LocalizedError {
             return "Nöbetçi eczane verisi okunamadı. Kaynak sayfa beklenmedik bir biçimde döndü."
 
         case .noDutyPharmacyFound:
-            return "Bulunduğun bölgede bugün için yayınlanmış nöbetçi eczane bulunamadı."
+            return "Bu bölgede bugün için yayınlanmış nöbetçi eczane bulunamadı."
+
+        case .districtsNotFound:
+            return "İlçe listesi alınamadı. İnternet bağlantını kontrol edip tekrar dene."
         }
     }
 }
