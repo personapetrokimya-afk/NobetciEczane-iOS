@@ -188,26 +188,15 @@ extension DutyPharmacyService {
                     ? extractTodaySection(from: html)
                     : html
 
-                var found = parseTableRows(
+                var found = extractPharmacies(
                     from: section,
                     fallbackDistrict: districtName
                 )
 
-                // Güvenlik ağı: dönem başlığına göre kesme tutmazsa
-                // sayfadaki VERİ SATIRI OLAN İLK tabloya düş.
-                if found.isEmpty,
-                   source.needsTodaySectionCut,
-                   let table = firstTableWithRows(in: html) {
-
-                    found = parseTableRows(
-                        from: table,
-                        fallbackDistrict: districtName
-                    )
-                }
-
-                if found.isEmpty {
-                    found = parseGenericBlocks(
-                        from: section,
+                // Dönem başlığına göre kesme tutmadıysa sayfanın tamamını dene.
+                if found.isEmpty, section.count < html.count {
+                    found = extractPharmacies(
+                        from: html,
                         fallbackDistrict: districtName
                     )
                 }
@@ -223,8 +212,14 @@ extension DutyPharmacyService {
                 }
 
                 // Sayfa geldi ama hiç kayıt çıkmadı: ağ değil, ayrıştırma sorunu.
+                let eczanesiCount = ranges(of: #"(?i)eczanesi"#, in: html).count
+                let nodeCount = ranges(
+                    of: #">\s*([^<>{}]{2,60}?[EeİiIı]czanesi)\s*<"#,
+                    in: html
+                ).count
+
                 lastError = .sourceUnavailable(
-                    detail: "sayfa geldi (\(html.count) karakter) ama 0 kayıt"
+                    detail: "sayfa \(html.count) krk, 'eczanesi' \(eczanesiCount), ad düğümü \(nodeCount), kayıt 0"
                 )
 
             } catch let error as ServiceError {

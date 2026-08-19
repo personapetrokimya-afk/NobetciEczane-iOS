@@ -290,7 +290,7 @@ struct DutyPharmacyService {
     /// kesme, başlığın METNİ değiştiği ilk noktada yapılır.
     func extractTodaySection(from html: String) -> String {
 
-        let markers = ranges(of: #"(?i)akşamından"#, in: html)
+        let markers = ranges(of: #"(?i)akşam"#, in: html)
 
         guard !markers.isEmpty else {
             return firstTableWithRows(in: html) ?? html
@@ -364,6 +364,135 @@ struct DutyPharmacyService {
         }
 
         return nil
+    }
+
+
+    // MARK: - Ana çıkarıcı (etiketten bağımsız)
+
+    /// Siteler tablo, kart veya div ızgarası kullanabiliyor; HTML etiketine
+    /// bağlı ayrıştırma bu yüzden kırılıyordu. Bu çıkarıcı yapıya değil METNE bakar:
+    ///
+    /// 1. "… Eczanesi" ile biten metin düğümlerini bulur (gerçek eczane adları hep böyledir).
+    /// 2. Her adın ARDINDAN gelen ~1800 karakterlik pencerede adres, telefon ve
+    ///    koordinatı arar. Pencere, o kaydın kendi bloğuna denk gelir.
+    ///
+    /// Böylece tablo da olsa kart da olsa aynı sonucu verir.
+    func extractPharmacies(
+        from html: String,
+        fallbackDistrict: String?
+    ) -> [Pharmacy] {
+
+        guard let regex = try? NSRegularExpression(
+            pattern: #">\s*([^<>{}]{2,60}?[EeİiIı]czanesi)\s*<"#
+        ) else {
+            return []
+        }
+
+        var result: [Pharmacy] = []
+        var seen = Set<String>()
+
+        let fullRange = NSRange(html.startIndex..., in: html)
+
+        for match in regex.matches(in: html, range: fullRange) {
+
+            guard match.numberOfRanges >= 2,
+                  let nameRange = Range(match.range(at: 1), in: html),
+                  let matchRange = Range(match.range, in: html)
+            else { continue }
+
+            let name = cleanHTML(String(html[nameRange]))
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard isValidDutyPharmacyName(name) else { continue }
+
+            let windowEnd = html.index(
+                matchRange.upperBound,
+                offsetBy: 1800,
+                limitedBy: html.endIndex
+            ) ?? html.endIndex
+
+            let window = String(html[matchRange.upperBound..<windowEnd])
+
+            let address = addressInWindow(window, name: name)
+            let phone = extractPhone(window)
+            let coordinates = extractCoordinates(window)
+
+            // Menü/başlık kırıntısı ele: adres veya telefon mutlaka olmalı.
+            guard !address.isEmpty || phone != nil else { continue }
+
+            let district =
+                extractDistrict(window, text: cleanHTML(window))
+                ?? fallbackDistrict
+
+            let key = normalize(name) + "|" + String(normalize(address).prefix(25))
+
+            guard seen.insert(key).inserted else { continue }
+
+            result.append(
+                Pharmacy(
+                    name: name,
+                    address: address,
+                    phone: phone,
+                    latitude: coordinates?.0,
+                    longitude: coordinates?.1,
+                    district: district
+                )
+            )
+        }
+
+        return result
+    }
+
+
+    /// Penceredeki ilk ADRES gibi görünen metin düğümü.
+    func addressInWindow(_ window: String, name: String) -> String {
+
+        let normalizedName = normalize(name)
+
+        for node in regexMatches(#">([^<>]{12,200})<"#, in: window) {
+
+            let text = cleanHTML(node)
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard text.count >= 15,
+                  normalize(text) != normalizedName,
+                  looksLikeAddress(text)
+            else { continue }
+
+            return cleanAddress(text)
+        }
+
+        let flat = cleanHTML(window)
+            .replacingOccurrences(of: "\n", with: " ")
+
+        if looksLikeAddress(flat) {
+            return cleanAddress(String(flat.prefix(160)))
+        }
+
+        return ""
+    }
+
+
+    /// Türkçe adres kelimeleri: Mah., Cad., Sok., No: …
+    func looksLikeAddress(_ text: String) -> Bool {
+
+        let tokens = Set(
+            normalize(text)
+                .split(separator: " ")
+                .map(String.init)
+        )
+
+        let keys: Set<String> = [
+            "mah", "mahalle", "mahallesi", "mh",
+            "cad", "cd", "cadde", "caddesi",
+            "sok", "sk", "sokak", "sokagi",
+            "bulvar", "bulvari", "blv", "bul",
+            "no", "kume", "mevki", "mevkii", "sitesi", "apt"
+        ]
+
+        return !tokens.isDisjoint(with: keys)
     }
 
 
@@ -645,9 +774,9 @@ struct DutyPharmacyService {
     func extractPhone(_ raw: String) -> String? {
 
         let patterns = [
-            #"(?i)tel:\s*([+0-9\s\(\)\-]{10,20})"#,
-            #"(0\s?\d{3}[\s\-\.]?\d{3}[\s\-\.]?\d{2}[\s\-\.]?\d{2})"#,
-            #"(\+90[\s\-\.]?\d{3}[\s\-\.]?\d{3}[\s\-\.]?\d{2}[\s\-\.]?\d{2})"#
+            #"(0\s*\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{2}[\s\-\.]?\d{2})"#,
+            #"(\+90[\s\-\.]?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{2}[\s\-\.]?\d{2})"#,
+            #"(?i)tel:\s*([+0-9\s\(\)\-]{10,20})"#
         ]
 
         for pattern in patterns {
