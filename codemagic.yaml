@@ -4,8 +4,16 @@ workflows:
     instance_type: mac_mini_m2
 
     scripts:
+      - name: Clean old build
+        script: |
+          rm -rf build
+          rm -rf Payload
+          rm -f NobetciEczane-unsigned.ipa
+
       - name: Build unsigned app
         script: |
+          set -e
+
           xcodebuild \
             -project NobetciEczane.xcodeproj \
             -scheme NobetciEczane \
@@ -15,13 +23,53 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            clean build
+
+      - name: Verify app executable
+        script: |
+          set -e
+
+          APP_PATH="build/Build/Products/Release-iphoneos/NobetciEczane.app"
+
+          echo "APP contents:"
+          ls -la "$APP_PATH"
+
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+
+          echo "CFBundleExecutable = $EXECUTABLE"
+
+          if [ ! -f "$APP_PATH/$EXECUTABLE" ]; then
+            echo "ERROR: Executable not found:"
+            echo "$APP_PATH/$EXECUTABLE"
+            exit 1
+          fi
+
+          echo "Executable exists:"
+          ls -la "$APP_PATH/$EXECUTABLE"
+
+          file "$APP_PATH/$EXECUTABLE"
 
       - name: Package IPA
         script: |
+          set -e
+
+          rm -rf Payload
           mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/NobetciEczane.app Payload/
-          zip -r NobetciEczane-unsigned.ipa Payload
+
+          cp -R \
+            build/Build/Products/Release-iphoneos/NobetciEczane.app \
+            Payload/
+
+          echo "Payload contents:"
+          find Payload -maxdepth 3 -type f -print
+
+          /usr/bin/zip -qry NobetciEczane-unsigned.ipa Payload
+
+          echo "IPA created:"
+          ls -lh NobetciEczane-unsigned.ipa
+
+          echo "IPA contents:"
+          unzip -l NobetciEczane-unsigned.ipa | head -100
 
     artifacts:
       - NobetciEczane-unsigned.ipa
