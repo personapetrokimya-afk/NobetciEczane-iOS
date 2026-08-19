@@ -1,1 +1,27 @@
+workflows:
+  ios-build:
+    name: Build iOS IPA
+    instance_type: mac_mini_m2
 
+    scripts:
+      - name: Build unsigned app
+        script: |
+          xcodebuild \
+            -project NobetciEczane.xcodeproj \
+            -scheme NobetciEczane \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        script: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/NobetciEczane.app Payload/
+          zip -r NobetciEczane-unsigned.ipa Payload
+
+    artifacts:
+      - NobetciEczane-unsigned.ipa
