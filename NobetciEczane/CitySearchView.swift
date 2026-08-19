@@ -242,14 +242,11 @@ struct DutyListView: View {
             if !pharmacies.isEmpty {
                 Section {
                     ForEach(pharmacies) { pharmacy in
-                        Button {
-                            openMaps(pharmacy)
-                        } label: {
-                            PharmacyRow(
-                                pharmacy: pharmacy,
-                                distanceText: distanceText(for: pharmacy)
-                            )
-                        }
+                        PharmacyRow(
+                            pharmacy: pharmacy,
+                            distanceText: distanceText(for: pharmacy),
+                            onRoute: { openMaps(pharmacy) }
+                        )
                     }
                 } header: {
                     Text("\(subtitle) · bugün nöbetçi \(pharmacies.count) eczane")
@@ -343,59 +340,114 @@ struct PharmacyRow: View {
     let pharmacy: Pharmacy
     let distanceText: String?
 
+    /// Satırın gövdesine (ad/adres/mesafe) dokunulduğunda çalışır.
+    let onRoute: () -> Void
+
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
 
-            Image(systemName: "cross.case.fill")
-                .font(.title3)
-                .foregroundStyle(.green)
-                .frame(width: 38, height: 38)
-                .background(.green.opacity(0.12), in: Circle())
+            // --- Gövde: her yerine dokunulunca haritada yol tarifi açılır ---
+            HStack(spacing: 14) {
 
-            VStack(alignment: .leading, spacing: 4) {
+                Image(systemName: "cross.case.fill")
+                    .font(.title3)
+                    .foregroundStyle(.green)
+                    .frame(width: 38, height: 38)
+                    .background(.green.opacity(0.12), in: Circle())
 
-                Text(pharmacy.name)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
+                VStack(alignment: .leading, spacing: 4) {
 
-                if !pharmacy.address.isEmpty {
-                    Text(pharmacy.address)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
+                    Text(pharmacy.name)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
 
-                HStack(spacing: 10) {
-
-                    if let distanceText {
-                        Text(distanceText)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.green)
-                    }
-
-                    if let phone = pharmacy.phone {
-                        Text(phone)
+                    if !pharmacy.address.isEmpty {
+                        Text(pharmacy.address)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(2)
                     }
 
-                    if pharmacy.isCrossVerified {
-                        Label(
-                            "\(pharmacy.sources.count) kaynak",
-                            systemImage: "checkmark.seal.fill"
-                        )
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.green)
+                    HStack(spacing: 10) {
+
+                        if let distanceText {
+                            Text(distanceText)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.green)
+                        }
+
+                        if let phone = pharmacy.phone {
+                            Text(phone)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if pharmacy.isCrossVerified {
+                            Label(
+                                "\(pharmacy.sources.count) kaynak",
+                                systemImage: "checkmark.seal.fill"
+                            )
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.green)
+                        }
                     }
                 }
+
+                Spacer(minLength: 0)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { onRoute() }
 
-            Spacer()
+            // --- Sağ kolon: yol tarifi ve arama butonları ---
+            VStack(spacing: 8) {
 
-            Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
-                .foregroundStyle(.secondary)
+                Button(action: onRoute) {
+                    Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
+                        .font(.title3)
+                        .foregroundStyle(.blue)
+                        .frame(width: 40, height: 34)
+                        .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Yol tarifi")
+
+                if let phone = pharmacy.phone,
+                   !PharmacyRow.dialDigits(phone).isEmpty {
+
+                    Button {
+                        PharmacyRow.call(phone)
+                    } label: {
+                        Image(systemName: "phone.fill")
+                            .font(.title3)
+                            .foregroundStyle(.green)
+                            .frame(width: 40, height: 34)
+                            .background(.green.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("\(pharmacy.name) eczanesini ara")
+                }
+            }
         }
         .padding(.vertical, 6)
+    }
+
+
+    /// "0 (232) 832-35-32" -> "02328323532"
+    static func dialDigits(_ phone: String) -> String {
+        phone.filter { $0.isNumber }
+    }
+
+
+    static func call(_ phone: String) {
+
+        let digits = dialDigits(phone)
+
+        guard digits.count >= 7,
+              let url = URL(string: "tel://\(digits)"),
+              UIApplication.shared.canOpenURL(url)
+        else { return }
+
+        UIApplication.shared.open(url)
     }
 }
 

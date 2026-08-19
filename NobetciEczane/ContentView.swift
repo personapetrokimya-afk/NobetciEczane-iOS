@@ -140,12 +140,11 @@ struct ContentView: View {
             List {
                 Section {
                     ForEach(pharmacies) { pharmacy in
-                        Button { openMaps(pharmacy) } label: {
-                            PharmacyRow(
-                                pharmacy: pharmacy,
-                                distanceText: formattedDistance(pharmacy)
-                            )
-                        }
+                        PharmacyRow(
+                            pharmacy: pharmacy,
+                            distanceText: formattedDistance(pharmacy),
+                            onRoute: { openMaps(pharmacy) }
+                        )
                     }
                 } header: {
                     Text("En yakından en uzağa · \(pharmacies.count) nöbetçi eczane")
