@@ -1,6 +1,5 @@
 import Foundation
 import CoreLocation
-import MapKit
 
 struct DutyPharmacyService {
     private let session: URLSession
@@ -27,17 +26,11 @@ struct DutyPharmacyService {
 
         let district = placemark.subAdministrativeArea ?? placemark.subLocality ?? placemark.locality
 
-        // Önce nöbetçi eczane kaynağını dener. Kaynak erişilemezse veya
-        // HTML yapısı değişmişse kullanıcıyı boş ekranda bırakmamak için
-        // Apple Maps yerel aramasına otomatik geçer.
-        do {
-            let pharmacies = try await fetchDutyPharmacies(city: city, district: district)
-            return sort(pharmacies, around: location)
-        } catch {
-            let fallback = try await fetchFromAppleMaps(near: location, city: city, district: district)
-            guard !fallback.isEmpty else { throw error }
-            return sort(fallback, around: location)
-        }
+        // Yalnızca doğrulanmış nöbetçi eczane kaynağını kullanır.
+        // Apple Maps / genel POI araması ASLA nöbetçi eczane kaynağı olarak kullanılmaz.
+        // Kaynak erişilemezse hata döner; normal bir eczane nöbetçi gibi gösterilmez.
+        let pharmacies = try await fetchDutyPharmacies(city: city, district: district)
+        return sort(pharmacies, around: location)
     }
 
     private func reverseGeocode(_ location: CLLocation) async throws -> CLPlacemark {
@@ -73,86 +66,24 @@ struct DutyPharmacyService {
         if let district, !district.isEmpty {
             let needle = normalize(district)
             let districtMatches = results.filter {
-                normalize($0.district ?? "").contains(needle) ||
-                normalize($0.address).contains(needle)
+                let itemDistrict = normalize($0.district ?? "")
+                let itemAddress = normalize($0.address)
+                return itemDistrict.contains(needle) || itemAddress.contains(needle)
             }
-            if !districtMatches.isEmpty {
-                results = districtMatches
+
+            // İlçe bulunduysa yalnızca o ilçenin sonuçları kabul edilir.
+            // Eşleşme yoksa şehir geneline geri düşmeyiz; aksi halde yakındaki
+            // normal/yanlış eczane "nöbetçi" gibi görünebilir.
+            guard !districtMatches.isEmpty else {
+                throw ServiceError.noDutyPharmacyFound
             }
+            results = districtMatches
         }
 
         guard !results.isEmpty else {
             throw ServiceError.noDutyPharmacyFound
         }
         return results
-    }
-
-    private func fetchFromAppleMaps(
-        near location: CLLocation,
-        city: String,
-        district: String?
-    ) async throws -> [Pharmacy] {
-        var queries: [String] = []
-
-        if let district, !district.isEmpty {
-            queries.append("nöbetçi eczane \(district) \(city)")
-        }
-        queries.append("nöbetçi eczane \(city)")
-        queries.append("nöbetçi eczane")
-
-        var collected: [Pharmacy] = []
-        var seen = Set<String>()
-
-        for query in queries {
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = query
-            request.resultTypes = .pointOfInterest
-            request.region = MKCoordinateRegion(
-                center: location.coordinate,
-                latitudinalMeters: 50_000,
-                longitudinalMeters: 50_000
-            )
-
-            do {
-                let response = try await MKLocalSearch(request: request).start()
-                for item in response.mapItems {
-                    guard let name = item.name, !name.isEmpty else { continue }
-
-                    let normalizedName = normalize(name)
-                    let address = item.placemark.title ?? "Adres bilgisi"
-                    let normalizedAddress = normalize(address)
-
-                    // Arama sağlayıcısının alakasız POI döndürmesini azaltır.
-                    guard normalizedName.contains("eczane") || normalizedAddress.contains("eczane") else {
-                        continue
-                    }
-
-                    let key = normalize(name + address)
-                    guard seen.insert(key).inserted else { continue }
-
-                    let coordinate = item.placemark.coordinate
-                    collected.append(
-                        Pharmacy(
-                            name: name,
-                            address: address,
-                            phone: item.phoneNumber,
-                            latitude: coordinate.latitude,
-                            longitude: coordinate.longitude,
-                            district: item.placemark.subLocality ?? item.placemark.locality
-                        )
-                    )
-                }
-            } catch {
-                continue
-            }
-
-            if !collected.isEmpty { break }
-        }
-
-        guard !collected.isEmpty else {
-            throw ServiceError.sourceUnavailable
-        }
-        return collected
     }
 
     private func sort(_ pharmacies: [Pharmacy], around location: CLLocation) -> [Pharmacy] {
