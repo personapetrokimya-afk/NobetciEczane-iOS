@@ -1,0 +1,62 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build unsigned app
+        run: |
+          set -e
+          xcodebuild \
+            -project NobetciEczane.xcodeproj \
+            -scheme NobetciEczane \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Fix and verify Info.plist
+        run: |
+          set -e
+          APP="build/Build/Products/Release-iphoneos/NobetciEczane.app"
+          PLIST="$APP/Info.plist"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable NobetciEczane" "$PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string NobetciEczane" "$PLIST"
+
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST")
+          echo "CFBundleExecutable = $EXE"
+
+          if [ ! -f "$APP/$EXE" ]; then
+            echo "HATA: $APP/$EXE bulunamadi!"
+            ls -la "$APP"
+            exit 1
+          fi
+
+          file "$APP/$EXE"
+
+      - name: Package IPA
+        run: |
+          set -e
+          rm -rf Payload NobetciEczane-unsigned.ipa
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/NobetciEczane.app Payload/
+          /usr/bin/zip -qry NobetciEczane-unsigned.ipa Payload -x "*.DS_Store"
+          unzip -l NobetciEczane-unsigned.ipa | head -30
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NobetciEczane-unsigned-ipa
+          path: NobetciEczane-unsigned.ipa
