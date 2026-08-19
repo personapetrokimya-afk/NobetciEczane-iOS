@@ -4,9 +4,8 @@ import UIKit
 
 /// Türkiye geneli manuel arama.
 /// Konum izni olmasa da, başka bir şehre bakmak isteyen kullanıcı için.
-struct CitySearchView: View {
-
-    @Environment(\.dismiss) private var dismiss
+/// İl listesi (gövde). Kendi NavigationStack'i yoktur; sarmalayan ekran sağlar.
+struct ProvinceListView: View {
 
     @State private var query = ""
 
@@ -25,36 +24,65 @@ struct CitySearchView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                if filtered.isEmpty {
-                    Text("Eşleşen il bulunamadı.")
-                        .foregroundStyle(.secondary)
-                }
+        List {
+            if filtered.isEmpty {
+                Text("Eşleşen il bulunamadı.")
+                    .foregroundStyle(.secondary)
+            }
 
-                ForEach(filtered) { province in
-                    NavigationLink {
-                        DistrictListView(province: province)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "building.2.fill")
-                                .foregroundStyle(.green)
-                            Text(province.name)
-                        }
+            ForEach(filtered) { province in
+                NavigationLink {
+                    DistrictListView(province: province)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "building.2.fill")
+                            .foregroundStyle(.green)
+                        Text(province.name)
                     }
                 }
             }
-            .listStyle(.plain)
-            .searchable(
-                text: $query,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "İl ara"
-            )
-            .navigationTitle("Şehir Seç")
-            .navigationBarTitleDisplayMode(.inline)
+        }
+        .listStyle(.plain)
+        .searchable(
+            text: $query,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "İl ara"
+        )
+        .navigationTitle("İller")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+
+/// Konumdan bulunan il/ilçe ile açılan ekran.
+/// Konum çözülemediyse doğrudan il listesi gösterilir.
+struct DetectedPlaceSheet: View {
+
+    let province: Province?
+    let district: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let province {
+                    DistrictListView(
+                        province: province,
+                        highlightedDistrict: district
+                    )
+                } else {
+                    ProvinceListView()
+                }
+            }
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button("Kapat") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink("Diğer iller") {
+                        ProvinceListView()
+                    }
                 }
             }
         }
@@ -68,6 +96,9 @@ struct DistrictListView: View {
 
     let province: Province
 
+    /// Konumdan bulunan ilçe. Verilirse listenin en üstünde işaretlenir.
+    var highlightedDistrict: String? = nil
+
     @State private var districts: [District] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
@@ -76,6 +107,28 @@ struct DistrictListView: View {
 
     var body: some View {
         List {
+            if let highlightedDistrict,
+               !highlightedDistrict.isEmpty {
+
+                Section("Konumunuz") {
+                    NavigationLink {
+                        DutyListView(
+                            citySlug: province.slug,
+                            districtSlug: service.slug(highlightedDistrict),
+                            title: highlightedDistrict,
+                            subtitle: province.name
+                        )
+                    } label: {
+                        Label(
+                            "\(province.name) · \(highlightedDistrict)",
+                            systemImage: "location.fill"
+                        )
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.green)
+                    }
+                }
+            }
+
             Section {
                 NavigationLink {
                     DutyListView(

@@ -63,16 +63,12 @@ struct DutyPharmacyService {
 
         log("📍 Şehir: \(city) (\(citySlug)) / İlçe: \(district ?? "-")")
 
-        // Şehrin TAMAMI taranır; ilçeye göre daraltma yapılmaz.
-        var result = await fetchCrossChecked(
-            citySlug: citySlug,
-            districtSlug: nil,
-            districtName: nil
-        )
+        // Önce İLÇE (en dar ve en isabetli liste), sonra il geneli.
+        // İkisi birleşip mesafeye göre sıralanır: ilçedekiler doğal olarak başa gelir,
+        // ilçede nöbetçi yoksa il genelindeki en yakınlar listelenir.
+        var result = CrossCheckResult()
 
-        // Hiçbir kaynak il sayfasını veremediyse ilçe sayfalarına düşülür.
-        if result.isEmpty,
-           let district,
+        if let district,
            !district.isEmpty {
 
             result = await fetchCrossChecked(
@@ -80,6 +76,23 @@ struct DutyPharmacyService {
                 districtSlug: slug(district),
                 districtName: district
             )
+        }
+
+        let cityWide = await fetchCrossChecked(
+            citySlug: citySlug,
+            districtSlug: nil,
+            districtName: nil
+        )
+
+        if result.isEmpty {
+            result = cityWide
+        } else if !cityWide.isEmpty {
+            result.pharmacies = merge(result.pharmacies, with: cityWide.pharmacies)
+            for source in cityWide.succeeded where !result.succeeded.contains(source) {
+                result.succeeded.append(source)
+            }
+        } else {
+            result.failures.append(contentsOf: cityWide.failures)
         }
 
         guard !result.isEmpty else {
@@ -97,6 +110,20 @@ struct DutyPharmacyService {
 
         // En yakından en uzağa.
         return sort(enriched, around: location)
+    }
+
+
+    /// Arayüz açılır açılmaz "şu an buradasın" bilgisini gösterebilsin diye
+    /// konumdan il ve ilçe birlikte çözümlenir.
+    func detectPlace(for location: CLLocation) async -> (city: String, district: String?)? {
+
+        guard let placemark = try? await reverseGeocode(location),
+              let city = detectCity(from: placemark),
+              !city.isEmpty else {
+            return nil
+        }
+
+        return (city, detectDistrict(from: placemark))
     }
 
 
@@ -253,32 +280,90 @@ struct DutyPharmacyService {
 
     // MARK: - Bugünkü nöbet bölümü
 
-    /// Sayfada 3 güne ait nöbet listesi bulunur.
-    /// Yalnızca ilk (bugünkü) listeyi almazsak yarınki eczaneleri de gösteririz.
+    /// Sayfada 3 güne ait nöbet listesi bulunur ve listeden önce
+    /// satırsız bir başlık tablosu yer alabilir. Bu yüzden "ilk tablo" yaklaşımı
+    /// yanlıştır; kesme işlemi NÖBET DÖNEMİ BAŞLIĞINA göre yapılır:
+    ///
+    ///   "19 Ağustos Çarşamba akşamından 20 Ağustos Perşembe sabahına kadar"
+    ///
+    /// İlk başlık bugünün nöbetidir. Aynı başlık birden çok tabloda tekrar edebilir;
+    /// kesme, başlığın METNİ değiştiği ilk noktada yapılır.
     func extractTodaySection(from html: String) -> String {
 
-        let tableRanges = ranges(of: #"(?is)<table\b"#, in: html)
+        let markers = ranges(of: #"(?i)akşamından"#, in: html)
 
-        guard let firstTable = tableRanges.first else {
-            return html
+        guard !markers.isEmpty else {
+            return firstTableWithRows(in: html) ?? html
         }
 
-        // İlk tablodan sonra gelen ikinci tablo bir sonraki güne aittir.
-        if tableRanges.count > 1 {
-            let secondTable = tableRanges[1]
-            return String(html[firstTable.lowerBound..<secondTable.lowerBound])
+        var firstKey: String?
+        var sectionStart = html.startIndex
+
+        for marker in markers {
+
+            let windowStart = html.index(
+                marker.lowerBound,
+                offsetBy: -160,
+                limitedBy: html.startIndex
+            ) ?? html.startIndex
+
+            let key = periodKey(from: String(html[windowStart..<marker.lowerBound]))
+
+            guard let currentFirst = firstKey else {
+                firstKey = key
+                sectionStart = windowStart
+                continue
+            }
+
+            // Başlık metni değiştiyse yeni gün başlamıştır: burada kes.
+            if !key.isEmpty, key != currentFirst {
+                return String(html[sectionStart..<marker.lowerBound])
+            }
         }
 
-        // Tek tablo varsa </table> sonuna kadar al.
-        if let closing = html.range(
-            of: #"(?is)</table>"#,
-            options: .regularExpression,
-            range: firstTable.lowerBound..<html.endIndex
-        ) {
-            return String(html[firstTable.lowerBound..<closing.upperBound])
+        return String(html[sectionStart...])
+    }
+
+
+    /// "… 19 Ağustos Çarşamba " parçasından "19 agustos" anahtarını çıkarır.
+    func periodKey(from fragment: String) -> String {
+
+        let text = cleanHTML(fragment)
+            .replacingOccurrences(of: "\n", with: " ")
+
+        let months =
+            "Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|"
+            + "Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık"
+
+        let pattern = "(\\d{1,2}\\s+(?:" + months + "))[^0-9]*$"
+
+        guard let match = firstMatch(pattern, in: text) else {
+            return ""
         }
 
-        return String(html[firstTable.lowerBound...])
+        return normalize(match)
+    }
+
+
+    /// Başlık bulunamazsa: içinde gerçekten veri satırı olan ilk tablo.
+    func firstTableWithRows(in html: String) -> String? {
+
+        let starts = ranges(of: #"(?is)<table\b"#, in: html)
+
+        for (index, start) in starts.enumerated() {
+
+            let end = index + 1 < starts.count
+                ? starts[index + 1].lowerBound
+                : html.endIndex
+
+            let chunk = String(html[start.lowerBound..<end])
+
+            if !parseTableRows(from: chunk, fallbackDistrict: nil).isEmpty {
+                return chunk
+            }
+        }
+
+        return nil
     }
 
 
@@ -307,7 +392,7 @@ struct DutyPharmacyService {
 
             let name = cleanPharmacyName(rawName)
 
-            guard name.count >= 3, name.count <= 100 else { continue }
+            guard isValidDutyPharmacyName(name) else { continue }
 
             var address = cells.count > 1 ? cleanAddress(cells[1]) : ""
             if address.isEmpty, cells.count > 2 {
@@ -321,6 +406,9 @@ struct DutyPharmacyService {
                 ?? fallbackDistrict
 
             let coordinates = extractCoordinates(row)
+
+            // Menü/başlık kırıntılarını ele: adres veya telefon mutlaka olmalı.
+            guard !address.isEmpty || phone != nil else { continue }
 
             result.append(
                 Pharmacy(
@@ -369,7 +457,7 @@ struct DutyPharmacyService {
 
             let name = cleanPharmacyName(rawName)
 
-            guard name.count >= 3, name.count <= 100 else { continue }
+            guard isValidDutyPharmacyName(name) else { continue }
 
             result.append(
                 Pharmacy(
@@ -473,6 +561,37 @@ struct DutyPharmacyService {
         )
 
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+
+    /// Gerçek bir nöbetçi eczane kaydı mı?
+    /// Türkiye'de eczane adları "… Eczanesi" ile biter; menü, bağlantı ve
+    /// reklam metinleri bu testi geçemez.
+    func isValidDutyPharmacyName(_ name: String) -> Bool {
+
+        let normalized = normalize(name)
+
+        guard normalized.count >= 5, normalized.count <= 60 else {
+            return false
+        }
+
+        guard normalized.hasSuffix("eczanesi") || normalized.hasSuffix("eczane") else {
+            return false
+        }
+
+        // "Eczane" / "Eczaneler" gibi tablo başlıklarını ele:
+        // gerçek ad en az iki kelimedir ("Hayat Eczanesi").
+        guard normalized.contains(" "), !normalized.hasPrefix("eczane") else {
+            return false
+        }
+
+        let blocked = ["nobetci", "listele", "haritada", "tum eczane", "eczane ara"]
+
+        for item in blocked where normalized.contains(item) {
+            return false
+        }
+
+        return true
     }
 
 

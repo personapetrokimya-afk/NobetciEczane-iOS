@@ -121,21 +121,58 @@ extension DutyPharmacyService {
 
         var result = CrossCheckResult()
 
-        for item in perSource {
+        let primary = DutySource.eczanelerGenTr
 
-            let sourceName = item.0.rawValue
+        let primaryList = perSource.first { $0.0 == primary }?.1 ?? []
+
+        if !primaryList.isEmpty {
+
+            // eczaneler.gen.tr yapısı bilinen ve tablo tabanlı kaynaktır: ASIL liste odur.
+            // Diğer kaynaklar yalnızca DOĞRULAR ve eksik alanı (koordinat/telefon) tamamlar,
+            // listeye yeni kayıt EKLEYEMEZ. Böylece menü/reklam kırıntıları listeye sızmaz.
+            result.succeeded.append(primary.rawValue)
+            result.pharmacies = primaryList
+
+            for item in perSource where item.0 != primary {
+
+                if item.1.isEmpty {
+                    result.failures.append("\(item.0.rawValue): \(item.2 ?? "kayıt yok")")
+                    continue
+                }
+
+                result.succeeded.append(item.0.rawValue)
+
+                result.pharmacies = merge(
+                    result.pharmacies,
+                    with: item.1,
+                    appendUnmatched: false
+                )
+            }
+
+            return result
+        }
+
+        // Asıl kaynak hiç yanıt vermediyse yedek kaynaklar kullanılır.
+        result.failures.append(
+            "\(primary.rawValue): \(perSource.first { $0.0 == primary }?.2 ?? "kayıt yok")"
+        )
+
+        for item in perSource where item.0 != primary {
 
             if item.1.isEmpty {
-                result.failures.append("\(sourceName): \(item.2 ?? "kayıt yok")")
+                result.failures.append("\(item.0.rawValue): \(item.2 ?? "kayıt yok")")
                 continue
             }
 
-            result.succeeded.append(sourceName)
-            result.pharmacies = merge(result.pharmacies, with: item.1)
+            result.succeeded.append(item.0.rawValue)
+
+            result.pharmacies = merge(
+                result.pharmacies,
+                with: item.1,
+                appendUnmatched: true
+            )
         }
 
-        // Çapraz doğrulananlar önce, sonra tek kaynaklılar.
-        // (Nihai sıralamayı mesafe belirler; bu yalnızca eşit mesafede tie-break.)
         return result
     }
 
@@ -195,9 +232,13 @@ extension DutyPharmacyService {
     /// Aynı eczane iki kaynakta da varsa tek kayda indirilir,
     /// eksik alanlar (koordinat, telefon, adres) diğer kaynaktan tamamlanır
     /// ve `sources` alanına ikinci kaynak eklenir.
-    func merge(_ base: [Pharmacy], with incoming: [Pharmacy]) -> [Pharmacy] {
+    func merge(
+        _ base: [Pharmacy],
+        with incoming: [Pharmacy],
+        appendUnmatched: Bool = true
+    ) -> [Pharmacy] {
 
-        guard !base.isEmpty else { return incoming }
+        guard !base.isEmpty else { return appendUnmatched ? incoming : [] }
 
         var merged = base
 
@@ -240,7 +281,7 @@ extension DutyPharmacyService {
 
                 merged[index] = existing
 
-            } else {
+            } else if appendUnmatched {
                 merged.append(candidate)
             }
         }

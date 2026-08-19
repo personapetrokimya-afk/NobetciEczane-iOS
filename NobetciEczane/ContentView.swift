@@ -9,7 +9,9 @@ struct ContentView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var hasSearched = false
-    @State private var showCitySearch = false
+    @State private var showPlaceSheet = false
+    @State private var detectedCity: String?
+    @State private var detectedDistrict: String?
 
     private let service = DutyPharmacyService()
 
@@ -49,8 +51,11 @@ struct ContentView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .sheet(isPresented: $showCitySearch) {
-            CitySearchView()
+        .sheet(isPresented: $showPlaceSheet) {
+            DetectedPlaceSheet(
+                province: detectedProvince,
+                district: detectedDistrict
+            )
         }
     }
 
@@ -90,16 +95,33 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             Button {
-                showCitySearch = true
+                showPlaceSheet = true
             } label: {
-                Label("Başka bir şehre bak", systemImage: "map")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.green)
-                    .padding(.vertical, 11)
-                    .padding(.horizontal, 20)
-                    .background(.green.opacity(0.12), in: Capsule())
+                HStack(spacing: 8) {
+
+                    Image(systemName: detectedCity == nil
+                          ? "location.magnifyingglass"
+                          : "location.fill")
+
+                    Text(placeLabel)
+
+                    if detectedCity != nil {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .opacity(0.6)
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(detectedCity == nil ? Color.secondary : Color.green)
+                .padding(.vertical, 11)
+                .padding(.horizontal, 20)
+                .background(
+                    (detectedCity == nil ? Color.gray : Color.green).opacity(0.12),
+                    in: Capsule()
+                )
             }
-            .disabled(isLoading)
+            .disabled(detectedCity == nil)
+            .accessibilityLabel("Bulunduğunuz konum: \(placeLabel)")
 
             Spacer()
 
@@ -146,9 +168,41 @@ struct ContentView: View {
         }
     }
 
+    /// Konum rozetinde gösterilecek metin.
+    private var placeLabel: String {
+
+        guard let detectedCity else {
+            return "Konum belirleniyor…"
+        }
+
+        if let detectedDistrict, !detectedDistrict.isEmpty {
+            return "\(detectedCity) · \(detectedDistrict)"
+        }
+
+        return detectedCity
+    }
+
+    /// Konumdan bulunan ili 81 il listesiyle eşleştirir.
+    private var detectedProvince: Province? {
+
+        guard let detectedCity else { return nil }
+
+        let needle = PharmacyText.normalize(detectedCity)
+
+        return TurkeyProvinces.all.first {
+            PharmacyText.normalize($0.name) == needle || $0.slug == needle
+        }
+    }
+
     private func refreshLocationOnEntry() async {
         do {
-            _ = try await locationManager.refreshCurrentLocation()
+            let location = try await locationManager.refreshCurrentLocation()
+
+            // Uygulama açılır açılmaz il ve ilçe işaretlenir.
+            if let place = await service.detectPlace(for: location) {
+                detectedCity = place.city
+                detectedDistrict = place.district
+            }
         } catch LocationError.requestAlreadyInProgress {
             // .task ve scenePhase aynı anda tetiklenirse ikinci isteği sessizce geç.
         } catch LocationError.permissionDenied {
