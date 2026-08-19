@@ -152,24 +152,17 @@ extension DutyPharmacyService {
             return result
         }
 
-        // Asıl kaynak hiç yanıt vermediyse yedek kaynaklar kullanılır.
+        // Asıl kaynak yanıt vermediyse LİSTE ÜRETİLMEZ.
+        // Yedek siteler kart yapılı olduğu için SSS/footer başlıklarını
+        // eczane sanıp listeye çöp dolduruyordu. Yanlış liste göstermektense
+        // hatayı sebebiyle birlikte göstermek doğrudur.
         result.failures.append(
             "\(primary.rawValue): \(perSource.first { $0.0 == primary }?.2 ?? "kayıt yok")"
         )
 
         for item in perSource where item.0 != primary {
-
-            if item.1.isEmpty {
-                result.failures.append("\(item.0.rawValue): \(item.2 ?? "kayıt yok")")
-                continue
-            }
-
-            result.succeeded.append(item.0.rawValue)
-
-            result.pharmacies = merge(
-                result.pharmacies,
-                with: item.1,
-                appendUnmatched: true
+            result.failures.append(
+                "\(item.0.rawValue): \(item.1.isEmpty ? (item.2 ?? "kayıt yok") : "\(item.1.count) kayıt (yalnızca doğrulama için)")"
             )
         }
 
@@ -200,6 +193,18 @@ extension DutyPharmacyService {
                     fallbackDistrict: districtName
                 )
 
+                // Güvenlik ağı: dönem başlığına göre kesme tutmazsa
+                // sayfadaki VERİ SATIRI OLAN İLK tabloya düş.
+                if found.isEmpty,
+                   source.needsTodaySectionCut,
+                   let table = firstTableWithRows(in: html) {
+
+                    found = parseTableRows(
+                        from: table,
+                        fallbackDistrict: districtName
+                    )
+                }
+
                 if found.isEmpty {
                     found = parseGenericBlocks(
                         from: section,
@@ -217,7 +222,10 @@ extension DutyPharmacyService {
                     return removeDuplicates(found)
                 }
 
-                lastError = .noDutyPharmacyFound
+                // Sayfa geldi ama hiç kayıt çıkmadı: ağ değil, ayrıştırma sorunu.
+                lastError = .sourceUnavailable(
+                    detail: "sayfa geldi (\(html.count) karakter) ama 0 kayıt"
+                )
 
             } catch let error as ServiceError {
                 lastError = error

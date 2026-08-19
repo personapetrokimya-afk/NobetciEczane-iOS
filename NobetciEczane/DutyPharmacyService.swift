@@ -575,13 +575,25 @@ struct DutyPharmacyService {
             return false
         }
 
-        guard normalized.hasSuffix("eczanesi") || normalized.hasSuffix("eczane") else {
+        // Türkiye'de eczane adları İSTİSNASIZ "… Eczanesi" ile biter.
+        // "24 Saat Açık Eczane", "En Yakın Eczane", "Gece Açık Eczane" gibi
+        // SSS/footer başlıkları "eczane" ile biter, "eczanesi" ile değil.
+        guard normalized.hasSuffix("eczanesi") else {
             return false
         }
 
-        // "Eczane" / "Eczaneler" gibi tablo başlıklarını ele:
-        // gerçek ad en az iki kelimedir ("Hayat Eczanesi").
+        // Gerçek ad en az iki kelimedir ("Hayat Eczanesi").
         guard normalized.contains(" "), !normalized.hasPrefix("eczane") else {
+            return false
+        }
+
+        // Site içi tanıtım/SSS kalıpları.
+        let banned = [
+            "24 saat", "gece acik", "pazar gunu", "en yakin",
+            "acik eczanesi", "sik sorulan", "yayin kunyesi", "hakkinda"
+        ]
+
+        for item in banned where normalized.contains(item) {
             return false
         }
 
