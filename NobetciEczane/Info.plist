@@ -16,6 +16,13 @@
     <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>NSLocationWhenInUseUsageDescription</key><string>Yakınınızdaki nöbetçi eczaneleri mesafeye göre sıralamak için konumunuz kullanılır.</string>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>comgooglemaps</string>
+        <string>yandexmaps</string>
+        <string>yandexnavi</string>
+        <string>waze</string>
+    </array>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key><true/>

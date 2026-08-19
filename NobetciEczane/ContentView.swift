@@ -142,8 +142,7 @@ struct ContentView: View {
                     ForEach(pharmacies) { pharmacy in
                         PharmacyRow(
                             pharmacy: pharmacy,
-                            distanceText: formattedDistance(pharmacy),
-                            onRoute: { openMaps(pharmacy) }
+                            distanceText: formattedDistance(pharmacy)
                         )
                     }
                 } header: {

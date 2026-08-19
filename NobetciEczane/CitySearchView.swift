@@ -244,8 +244,7 @@ struct DutyListView: View {
                     ForEach(pharmacies) { pharmacy in
                         PharmacyRow(
                             pharmacy: pharmacy,
-                            distanceText: distanceText(for: pharmacy),
-                            onRoute: { openMaps(pharmacy) }
+                            distanceText: distanceText(for: pharmacy)
                         )
                     }
                 } header: {
@@ -340,8 +339,10 @@ struct PharmacyRow: View {
     let pharmacy: Pharmacy
     let distanceText: String?
 
-    /// Satırın gövdesine (ad/adres/mesafe) dokunulduğunda çalışır.
-    let onRoute: () -> Void
+    @State private var showMapPicker = false
+
+    /// Telefonda kurulu harita uygulamaları.
+    private var mapApps: [MapApp] { MapApp.installed }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -396,12 +397,12 @@ struct PharmacyRow: View {
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
-            .onTapGesture { onRoute() }
+            .onTapGesture { route() }
 
             // --- Sağ kolon: yol tarifi ve arama butonları ---
             VStack(spacing: 8) {
 
-                Button(action: onRoute) {
+                Button(action: route) {
                     Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
                         .font(.title3)
                         .foregroundStyle(.blue)
@@ -429,6 +430,25 @@ struct PharmacyRow: View {
             }
         }
         .padding(.vertical, 6)
+        .sheet(isPresented: $showMapPicker) {
+            MapAppPicker(pharmacy: pharmacy, apps: mapApps)
+                .presentationDetents([.medium, .large])
+        }
+    }
+
+
+    /// Tek harita uygulaması varsa doğrudan açar,
+    /// birden fazlaysa kullanıcıya seçenek sunar.
+    private func route() {
+
+        let apps = mapApps
+
+        if apps.count <= 1 {
+            (apps.first ?? .apple).openRoute(to: pharmacy)
+            return
+        }
+
+        showMapPicker = true
     }
 
 
