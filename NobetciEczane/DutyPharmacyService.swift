@@ -280,14 +280,16 @@ struct DutyPharmacyService {
 
     // MARK: - Bugünkü nöbet bölümü
 
-    /// Sayfada 3 güne ait nöbet listesi bulunur ve listeden önce
-    /// satırsız bir başlık tablosu yer alabilir. Bu yüzden "ilk tablo" yaklaşımı
-    /// yanlıştır; kesme işlemi NÖBET DÖNEMİ BAŞLIĞINA göre yapılır:
+    /// Sayfada birden çok güne ait nöbet listesi bulunur; her dönem şu tarz bir
+    /// başlıkla ayrılır:
     ///
     ///   "19 Ağustos Çarşamba akşamından 20 Ağustos Perşembe sabahına kadar"
     ///
-    /// İlk başlık bugünün nöbetidir. Aynı başlık birden çok tabloda tekrar edebilir;
-    /// kesme, başlığın METNİ değiştiği ilk noktada yapılır.
+    /// ÖNEMLİ: Doğru dönem, sayfadaki SIRAYA göre (ilk bölüm) değil, CİHAZ TARİHİNE
+    /// göre seçilir. Site listede dünü de yayınladığından "ilk bölüm = bugün"
+    /// varsayımı, sabahtan sonra DÜNKÜ nöbeti gösteriyordu. Bunun yerine başlıktaki
+    /// başlangıç tarihi, `currentDutyDateKey()` ile hesaplanan bugünün nöbet tarihine
+    /// eşleşen bölüm alınır. Eşleşme yoksa (sayfa o günü yayınlamıyorsa) ilk bölüme düşülür.
     func extractTodaySection(from html: String) -> String {
 
         let markers = ranges(of: #"(?i)akşam"#, in: html)
@@ -296,8 +298,17 @@ struct DutyPharmacyService {
             return firstTableWithRows(in: html) ?? html
         }
 
-        var firstKey: String?
-        var sectionStart = html.startIndex
+        // Her dönem başlığının anahtarını ("19 agustos") ve sayfadaki başlangıç
+        // konumunu topla. Sayfada birden çok güne ait liste bulunur; hangisinin
+        // BUGÜN geçerli olduğunu SAYFADAKİ SIRAYA göre değil, CİHAZ TARİHİNE göre
+        // seçeriz. Eski davranış "ilk bölüm = bugün" varsayıyordu; site listede
+        // dünü de yayınladığı için sabahtan sonra DÜNKÜ nöbeti gösteriyordu.
+        struct DutySection {
+            var key: String
+            var start: String.Index
+        }
+
+        var sections: [DutySection] = []
 
         for marker in markers {
 
@@ -309,19 +320,69 @@ struct DutyPharmacyService {
 
             let key = periodKey(from: String(html[windowStart..<marker.lowerBound]))
 
-            guard let currentFirst = firstKey else {
-                firstKey = key
-                sectionStart = windowStart
+            // Aynı dönem başlığı birden çok tabloda tekrar edebilir; yalnızca
+            // anahtarın DEĞİŞTİĞİ noktaları yeni bölüm sınırı sayarız.
+            if let last = sections.last, last.key == key {
                 continue
             }
 
-            // Başlık metni değiştiyse yeni gün başlamıştır: burada kes.
-            if !key.isEmpty, key != currentFirst {
-                return String(html[sectionStart..<marker.lowerBound])
-            }
+            sections.append(DutySection(key: key, start: windowStart))
         }
 
-        return String(html[sectionStart...])
+        guard !sections.isEmpty else {
+            return firstTableWithRows(in: html) ?? html
+        }
+
+        // Bir bölümün gövdesi: kendi başlangıcından bir sonraki bölümün başlangıcına.
+        func body(at index: Int) -> String {
+            let start = sections[index].start
+            let end = index + 1 < sections.count ? sections[index + 1].start : html.endIndex
+            return String(html[start..<end])
+        }
+
+        // 1) Cihaz tarihine (İstanbul saati + sabah devri) denk gelen dönemi seç.
+        let targetKey = currentDutyDateKey()
+
+        if !targetKey.isEmpty,
+           let index = sections.firstIndex(where: { $0.key == targetKey }) {
+            return body(at: index)
+        }
+
+        // 2) Tarih eşleşmezse (sayfa o günü henüz/artık yayınlamıyorsa) ilk dönem.
+        return body(at: 0)
+    }
+
+
+    /// Cihaz saatine göre BUGÜN geçerli olan nöbet döneminin başlangıç tarihini
+    /// "20 agustos" biçiminde (periodKey ile aynı normalizasyon) döndürür.
+    ///
+    /// Nöbet "akşamından sabahına" sürdüğü için sabah devir saatinden ÖNCE hâlâ
+    /// dün akşam başlayan nöbet geçerlidir; bu yüzden erken saatlerde hedef tarih
+    /// bir gün geri alınır. Böylece gece 03:00'te de doğru (o an açık olan) nöbet
+    /// bölümü seçilir.
+    func currentDutyDateKey(now: Date = Date()) -> String {
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Istanbul") ?? .current
+
+        let handoverHour = 8
+        let hour = calendar.component(.hour, from: now)
+
+        let target = hour < handoverHour
+            ? (calendar.date(byAdding: .day, value: -1, to: now) ?? now)
+            : now
+
+        let day = calendar.component(.day, from: target)
+        let month = calendar.component(.month, from: target)
+
+        let months = [
+            "", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+            "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
+        ]
+
+        guard month >= 1, month <= 12 else { return "" }
+
+        return normalize("\(day) \(months[month])")
     }
 
 
