@@ -365,7 +365,9 @@ struct DutyPharmacyService {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Europe/Istanbul") ?? .current
 
-        let handoverHour = 8
+        // Türkiye'de nöbet HER GÜN SABAH 09:00'da devredilir. 09:00'dan önce
+        // hâlâ dün akşam başlayan nöbet geçerlidir.
+        let handoverHour = 9
         let hour = calendar.component(.hour, from: now)
 
         let target = hour < handoverHour
