@@ -423,8 +423,10 @@ struct ContentView: View {
             do {
                 let location = try await locationManager.requestCurrentLocation()
 
-                // Konum yeni geldiyse il/ilçe rozetini de tazele.
-                if let place = await service.detectPlace(for: location) {
+                // Konum bir kez çözülür; hem rozet hem arama aynı sonucu kullanır.
+                let place = await service.detectPlace(for: location)
+
+                if let place {
                     await MainActor.run {
                         detectedCity = place.city
                         detectedDistrict = place.district
@@ -433,21 +435,30 @@ struct ContentView: View {
 
                 await MainActor.run { phase = .searching }
 
-                // 1) Bugünün nöbetçileri.
+                // Nöbetçi taraması ile "şu an açık" harita araması AYNI ANDA başlar;
+                // açık eczaneler nöbetçi listesini beklemez.
+                async let openTask = nearbyFinder.openNow(
+                    around: location,
+                    excluding: []
+                )
+
                 var duty: [Pharmacy] = []
                 var note: String?
 
                 do {
-                    duty = try await service.fetchNearest(to: location)
+                    duty = try await service.fetchNearest(
+                        to: location,
+                        knownPlace: place
+                    )
                 } catch {
                     note = error.localizedDescription
                 }
 
-                // 2) Mesai içindeyse yakındaki AÇIK eczaneler.
-                let open = await nearbyFinder.openNow(
-                    around: location,
-                    excluding: duty
-                )
+                // Nöbetçiler "şu an açık" listesinde tekrarlanmasın.
+                let dutyKeys = Set(duty.map { NearbyOpenPharmacyFinder.key(for: $0.name) })
+                let open = await openTask.filter {
+                    !dutyKeys.contains(NearbyOpenPharmacyFinder.key(for: $0.name))
+                }
 
                 await MainActor.run {
 

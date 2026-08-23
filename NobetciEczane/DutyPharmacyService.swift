@@ -22,9 +22,11 @@ struct DutyPharmacyService {
     init() {
         let config = URLSessionConfiguration.ephemeral
 
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 25
-        config.waitsForConnectivity = false          // Ağ yoksa 25 sn beklemek yerine hemen hata ver.
+        // Hız hedefi: sonuç en geç 10-15 saniyede. Yavaş bir site tüm aramayı
+        // sürüklemesin diye istek başına 8 sn üst sınır.
+        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForResource = 12
+        config.waitsForConnectivity = false          // Ağ yoksa beklemek yerine hemen hata ver.
 
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.urlCache = nil
@@ -57,41 +59,53 @@ struct DutyPharmacyService {
     func fetchNearest(
         to location: CLLocation,
         limit: Int = 15,
-        maxDistance: CLLocationDistance = 20_000
+        maxDistance: CLLocationDistance = 20_000,
+        knownPlace: (city: String, district: String?)? = nil
     ) async throws -> [Pharmacy] {
 
-        let placemark = try await reverseGeocode(location)
+        // Konum zaten çözülmüşse (arayüz açılışta çözüyor) yeniden çözme:
+        // her reverse-geocode 0,5-1 sn kazandırır.
+        let city: String
+        let district: String?
 
-        guard let city = detectCity(from: placemark),
-              !city.isEmpty else {
-            throw ServiceError.cityNotFound
+        if let knownPlace {
+            city = knownPlace.city
+            district = knownPlace.district
+        } else {
+            let placemark = try await reverseGeocode(location)
+
+            guard let detected = detectCity(from: placemark),
+                  !detected.isEmpty else {
+                throw ServiceError.cityNotFound
+            }
+
+            city = detected
+            district = detectDistrict(from: placemark)
         }
 
-        let district = detectDistrict(from: placemark)
         let citySlug = slug(city)
 
         log("📍 Şehir: \(city) (\(citySlug)) / İlçe: \(district ?? "-")")
 
-        // Önce İLÇE (en dar ve en isabetli liste), sonra il geneli.
-        // İkisi birleşip mesafeye göre sıralanır: ilçedekiler doğal olarak başa gelir,
-        // ilçede nöbetçi yoksa il genelindeki en yakınlar listelenir.
-        var result = CrossCheckResult()
-
-        if let district,
-           !district.isEmpty {
-
-            result = await fetchCrossChecked(
+        // İLÇE (en isabetli liste) ve İL GENELİ (komşu bölgeler) taramaları
+        // AYNI ANDA başlar; toplam süre yavaş olanın süresi kadar olur.
+        async let districtTask: CrossCheckResult? = {
+            guard let district, !district.isEmpty else { return nil }
+            return await self.fetchCrossChecked(
                 citySlug: citySlug,
-                districtSlug: slug(district),
+                districtSlug: self.slug(district),
                 districtName: district
             )
-        }
+        }()
 
-        let cityWide = await fetchCrossChecked(
+        async let cityTask = fetchCrossChecked(
             citySlug: citySlug,
             districtSlug: nil,
             districtName: nil
         )
+
+        var result = await districtTask ?? CrossCheckResult()
+        let cityWide = await cityTask
 
         if result.isEmpty {
             result = cityWide
@@ -184,13 +198,14 @@ struct DutyPharmacyService {
 
         var lastDetail = "bilinmiyor"
 
-        // Geçici ağ hataları için 2 deneme.
-        for attempt in 1...2 {
+        // TEK deneme: 15 kaynak paralel sorgulandığı için tek tek yeniden
+        // denemek yerine diğer kaynaklara güvenmek çok daha hızlıdır.
+        for attempt in 1...1 {
 
             var request = URLRequest(
                 url: url,
                 cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
-                timeoutInterval: 15
+                timeoutInterval: 8
             )
 
             request.httpMethod = "GET"
@@ -237,9 +252,7 @@ struct DutyPharmacyService {
                 lastDetail = error.localizedDescription
             }
 
-            if attempt == 1 {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-            }
+            _ = attempt
         }
 
         throw ServiceError.sourceUnavailable(detail: lastDetail)
@@ -1090,9 +1103,10 @@ struct DutyPharmacyService {
         city: String
     ) async -> [Pharmacy] {
 
-        // CLGeocoder hız sınırlıdır. En fazla 20 kayıt için deneriz,
-        // aksi halde uygulama dakikalarca "yükleniyor" durumunda kalır.
-        let limit = 20
+        // CLGeocoder hız sınırlıdır ve her çağrı ~0,5 sn sürer.
+        // 10-15 sn hedefi için en fazla 8 kayıt tamamlanır; koordinatı
+        // çözülemeyen kayıt yine listelenir, yalnızca mesafesi bilinmez.
+        let limit = 8
 
         var result: [Pharmacy] = []
         var geocoded = 0
@@ -1148,7 +1162,7 @@ struct DutyPharmacyService {
                 result.append(pharmacy)
             }
 
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            try? await Task.sleep(nanoseconds: 60_000_000)
         }
 
         return result

@@ -303,22 +303,26 @@ extension DutyPharmacyService {
 
     /// Tüm kaynakları PARALEL sorgular, sonuçları birleştirir ve çapraz doğrular.
     ///
+    /// HIZ: Kaynaklar aynı anda sorgulanır ve her yanıt geldikçe sonuç denenir.
+    /// KANITLI (dönem başlığı bugünle eşleşen) ana liste gelir gelmez ve
+    /// TÜM kayıtları ikinci bir kaynakça doğrulanır doğrulanmaz kalan
+    /// kaynaklar İPTAL edilir — tipik arama 2-4 saniyede biter.
+    ///
     /// Kural:
     /// 1. Liste, GÜNÜ KANITLAMIŞ en öncelikli "leading" kaynağın kayıtları üzerine kurulur.
-    ///    Hiçbir kaynak günü kanıtlayamıyorsa liste ÜRETİLMEZ — yanlış günün listesini
-    ///    göstermektense hiç göstermemek doğrudur.
     /// 2. Diğer kaynaklar bu kayıtları doğrular ve eksik alanlarını tamamlar.
-    /// 3. Ana listede olmayan bir kayıt, ancak EN AZ İKİ kaynak (en az biri günü
-    ///    kanıtlamış olmak üzere) onu bildiriyorsa listeye eklenir.
+    /// 3. Ana listede olmayan bir kayıt ancak İKİ AYRI doğrulanmış leading
+    ///    kaynağın anlaşmasıyla girebilir.
     func fetchCrossChecked(
         citySlug: String,
         districtSlug: String?,
         districtName: String?
     ) async -> CrossCheckResult {
 
-        var outcomes: [SourceOutcome] = []
-
-        await withTaskGroup(of: SourceOutcome.self) { group in
+        await withTaskGroup(
+            of: SourceOutcome.self,
+            returning: CrossCheckResult.self
+        ) { group in
 
             for source in DutySource.allCases {
                 group.addTask {
@@ -353,13 +357,38 @@ extension DutyPharmacyService {
                 }
             }
 
+            var outcomes: [SourceOutcome] = []
+
             for await item in group {
+
                 outcomes.append(item)
+
+                // ERKEN BİTİŞ: kanıtlı ana liste geldi ve bütün kayıtları
+                // en az bir başka kaynakça doğrulandıysa gerisini bekleme.
+                // (Kanıtsız iki hızlı kaynağın anlaşmasıyla ASLA erken bitmez;
+                // yavaş gelen kanıtlı kaynak yanlış listeyi düzeltebilmelidir.)
+                let candidate = assembleCrossCheck(outcomes)
+
+                if candidate.dayConfidence == .period,
+                   !candidate.pharmacies.isEmpty,
+                   candidate.pharmacies.allSatisfy({ $0.sources.count >= 2 }) {
+
+                    group.cancelAll()
+                    log("⚡️ Erken bitiş: \(candidate.succeeded.joined(separator: ", "))")
+                    return candidate
+                }
             }
+
+            return assembleCrossCheck(outcomes)
         }
+    }
+
+
+    /// Eldeki kaynak yanıtlarından çapraz doğrulanmış listeyi kurar.
+    func assembleCrossCheck(_ raw: [SourceOutcome]) -> CrossCheckResult {
 
         // Sonuç her seferinde aynı olsun diye kaynak sırası sabitlenir.
-        outcomes.sort { $0.source.priority < $1.source.priority }
+        let outcomes = raw.sorted { $0.source.priority < $1.source.priority }
 
         var result = CrossCheckResult()
 
@@ -416,7 +445,7 @@ extension DutyPharmacyService {
                 appendUnmatched: false
             )
 
-            // Ana listede OLMAYAN kayıtlar: en az iki kaynak söylerse eklenecek.
+            // Ana listede OLMAYAN kayıtlar: ekstra aday olarak biriktirilir.
             for candidate in item.pharmacies {
 
                 let key = matchKey(candidate)
@@ -456,14 +485,10 @@ extension DutyPharmacyService {
         }
 
         // 3) Ek kayıt kuralı — SAYDAM VAKASI:
-        //    İki bayat site aynı yanlış eczanede anlaşınca "2 kaynak söylüyor"
-        //    kuralı deliniyor ve nöbetçi olmayan eczane listeye giriyordu.
-        //
-        //    Yeni kural: Ana liste tarihli dönem başlığıyla KANITLIYSA (.period),
-        //    o liste resmî listedir — diğer kaynaklar ona kayıt EKLEYEMEZ,
-        //    yalnızca telefon/koordinat tamamlar. Kanıtlı kaynak yoksa ek kayıt,
-        //    ancak İKİ AYRI doğrulanmış (leading + tarih yazan) kaynağın
-        //    anlaşmasıyla girebilir; bir leading + bir bayat site yetmez.
+        //    Ana liste tarihli dönem başlığıyla KANITLIYSA (.period), o liste
+        //    resmî listedir — diğer kaynaklar ona kayıt EKLEYEMEZ, yalnızca
+        //    telefon/koordinat tamamlar. Kanıtlı kaynak yoksa ek kayıt, ancak
+        //    İKİ AYRI doğrulanmış (leading + tarih yazan) kaynağın anlaşmasıyla girer.
         if result.dayConfidence < .period {
 
             let trustedLeading = Set(
