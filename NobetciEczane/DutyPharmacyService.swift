@@ -104,7 +104,8 @@ struct DutyPharmacyService {
             citySlug: citySlug,
             districtSlug: nil,
             districtName: nil,
-            bypassCache: forceRefresh
+            bypassCache: forceRefresh,
+            sufficientCount: limit
         )
 
         var result = await districtTask ?? CrossCheckResult()

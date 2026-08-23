@@ -348,11 +348,16 @@ extension DutyPharmacyService {
     /// 2. Diğer kaynaklar bu kayıtları doğrular ve eksik alanlarını tamamlar.
     /// 3. Ana listede olmayan bir kayıt ancak İKİ AYRI doğrulanmış leading
     ///    kaynağın anlaşmasıyla girebilir.
+    /// `sufficientCount`: bu kadar kayıt çapraz doğrulanınca tarama erken
+    /// kesilebilir. İl geneli taramasında kullanılır — İzmir'in 30 ilçesindeki
+    /// TÜM eczaneleri doğrulamayı beklemek yerine, listeye girecek kadar
+    /// (örn. 15) kayıt doğrulanınca durulur.
     func fetchCrossChecked(
         citySlug: String,
         districtSlug: String?,
         districtName: String?,
-        bypassCache: Bool = false
+        bypassCache: Bool = false,
+        sufficientCount: Int? = nil
     ) async -> CrossCheckResult {
 
         // Aynı gün + aynı bölge için sonuç zaten alınmışsa ağı hiç kullanma.
@@ -453,12 +458,22 @@ extension DutyPharmacyService {
                 let candidate = assembleCrossCheck(outcomes)
 
                 if candidate.dayConfidence == .period,
-                   !candidate.pharmacies.isEmpty,
-                   candidate.pharmacies.allSatisfy({ $0.sources.count >= 2 }) {
+                   !candidate.pharmacies.isEmpty {
 
-                    group.cancelAll()
-                    log("⚡️ Erken bitiş: \(candidate.succeeded.joined(separator: ", "))")
-                    return candidate
+                    let verifiedCount = candidate.pharmacies
+                        .filter { $0.sources.count >= 2 }
+                        .count
+
+                    // Bitiş şartı: ya listenin TAMAMI doğrulandı (ilçe taraması)
+                    // ya da listeye girecek KADAR kayıt doğrulandı (il taraması).
+                    let allVerified = verifiedCount == candidate.pharmacies.count
+                    let enough = sufficientCount.map { verifiedCount >= $0 } ?? false
+
+                    if allVerified || enough {
+                        group.cancelAll()
+                        log("⚡️ Erken bitiş (\(verifiedCount) doğrulanmış): \(candidate.succeeded.joined(separator: ", "))")
+                        return candidate
+                    }
                 }
 
                 // İlk dalganın üçü de yanıtladı ama sonuç bağlanamadı: genişle.
