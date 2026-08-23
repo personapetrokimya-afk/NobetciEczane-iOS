@@ -56,7 +56,8 @@ struct DutyPharmacyService {
     /// 5. Liste, telefona en yakın eczaneden en uzağa sıralanır.
     func fetchNearest(
         to location: CLLocation,
-        limit: Int = 30
+        limit: Int = 15,
+        maxDistance: CLLocationDistance = 20_000
     ) async throws -> [Pharmacy] {
 
         let placemark = try await reverseGeocode(location)
@@ -95,7 +96,20 @@ struct DutyPharmacyService {
         if result.isEmpty {
             result = cityWide
         } else if !cityWide.isEmpty {
-            result.pharmacies = merge(result.pharmacies, with: cityWide.pharmacies)
+
+            // İl listesi, ilçe listesine ancak GÜN GÜVENCESİ ilçe listesinden
+            // düşük DEĞİLSE yeni kayıt ekleyebilir. Aksi hâlde (ör. ilçe listesi
+            // dönem başlığıyla kanıtlı ama il listesi bayat bir siteden geldiyse)
+            // yalnızca eksik telefon/koordinat tamamlar — Saydam vakası böyle
+            // kapatıldı: bayat il listesi kanıtlı ilçe listesine kayıt sızdıramaz.
+            let canAppend = cityWide.dayConfidence >= result.dayConfidence
+
+            result.pharmacies = merge(
+                result.pharmacies,
+                with: cityWide.pharmacies,
+                appendUnmatched: canAppend
+            )
+
             for source in cityWide.succeeded where !result.succeeded.contains(source) {
                 result.succeeded.append(source)
             }
@@ -120,13 +134,35 @@ struct DutyPharmacyService {
             throw ServiceError.dutyListNotPublished
         }
 
-        log("✅ Kaynaklar: \(result.succeeded.joined(separator: ", ")) — \(active.count) nöbetçi")
+        // KESİN KURAL: EN AZ İKİ bağımsız kaynağın doğrulamadığı kayıt gösterilmez.
+        // Tek kaynağın söylediği eczane, o kaynak yanılıyorsa kullanıcıyı kapalı
+        // kapıya gönderir; iki kaynak aynı anda nadiren yanılır.
+        let confirmed = active.filter { $0.isCrossVerified }
+
+        guard !confirmed.isEmpty else {
+            throw ServiceError.notCrossVerified(
+                sourceCount: result.succeeded.count
+            )
+        }
+
+        log("✅ Kaynaklar: \(result.succeeded.joined(separator: ", ")) — \(confirmed.count)/\(active.count) kayıt çapraz doğrulandı")
 
         // Koordinatı hiçbir kaynaktan çıkmayan kayıtlar adresten tamamlanır.
-        let enriched = await enrichMissingCoordinates(active, city: city)
+        let enriched = await enrichMissingCoordinates(confirmed, city: city)
 
-        // En yakından en uzağa; uzaktaki onlarca kayıt listeyi boğmasın.
-        return Array(sort(enriched, around: location).prefix(limit))
+        // 20 km'den uzak eczane gösterilmez. Koordinatı çözülemeyen kayıt
+        // (mesafesi bilinmiyor) elenmez; sıralamada en sona düşer.
+        let inRange = enriched.filter { pharmacy in
+            guard let distance = pharmacy.distance(from: location) else { return true }
+            return distance <= maxDistance
+        }
+
+        guard !inRange.isEmpty else {
+            throw ServiceError.noDutyPharmacyFound
+        }
+
+        // En yakından en uzağa; en fazla `limit` kayıt.
+        return Array(sort(inRange, around: location).prefix(limit))
     }
 
 
@@ -366,8 +402,9 @@ struct DutyPharmacyService {
         let month = calendar.component(.month, from: dutyDate)
         let year = calendar.component(.year, from: dutyDate)
 
-        // Tarih sayfanın üst bölümünde yazar; tüm sayfayı normalize etmek pahalıdır.
-        let text = normalize(String(html.prefix(60_000)))
+        // Haber portallarında (milliyet, sabah) liste sayfanın derinlerinde
+        // olabildiği için geniş bir pencere taranır.
+        let text = normalize(String(html.prefix(300_000)))
 
         var needles = [dutyDateKey(for: dutyDate)]                    // "23 agustos"
 
@@ -1409,19 +1446,28 @@ extension DutyPharmacyService {
             throw ServiceError.dutyListNotPublished
         }
 
+        // KESİN KURAL: en az iki bağımsız kaynağın doğrulamadığı kayıt gösterilmez.
+        let confirmed = active.filter { $0.isCrossVerified }
+
+        guard !confirmed.isEmpty else {
+            throw ServiceError.notCrossVerified(
+                sourceCount: result.succeeded.count
+            )
+        }
+
         // Bazı kaynaklar ilçe sayfası sunmadığı için il listesi döner;
         // ilçe istendiyse burada süzülür.
         if let districtName,
            !districtName.isEmpty {
 
-            let narrowed = filter(active, byDistrict: districtName)
+            let narrowed = filter(confirmed, byDistrict: districtName)
 
             if !narrowed.isEmpty {
                 return narrowed
             }
         }
 
-        return active
+        return confirmed
     }
 
 
@@ -1517,6 +1563,7 @@ enum ServiceError: LocalizedError {
     case invalidResponse
     case noDutyPharmacyFound
     case dutyListNotPublished
+    case notCrossVerified(sourceCount: Int)
     case districtsNotFound
 
     var diagnosticText: String {
@@ -1527,6 +1574,7 @@ enum ServiceError: LocalizedError {
         case .invalidResponse:      return "yanıt okunamadı"
         case .noDutyPharmacyFound:  return "listede kayıt yok"
         case .dutyListNotPublished: return "bugünün nöbet listesi yayınlanmamış"
+        case .notCrossVerified(let count): return "çapraz doğrulama yok (\(count) kaynak yanıt verdi)"
         case .districtsNotFound:    return "ilçe listesi okunamadı"
         }
     }
@@ -1562,6 +1610,15 @@ enum ServiceError: LocalizedError {
 
             Yanlış güne ait liste göstermemek için bu kayıtlar gizlendi. \
             Birazdan tekrar deneyebilir ya da 182 ALO Sağlık Hattı'nı arayabilirsin.
+            """
+
+        case .notCrossVerified(let count):
+            return """
+            Nöbetçi listesi yalnızca tek kaynaktan alınabildi (\(count) kaynak yanıt verdi) \
+            ve ikinci bir kaynakla doğrulanamadı.
+
+            Yanlış eczaneye gitmeni önlemek için doğrulanmamış liste gösterilmiyor. \
+            Birazdan tekrar dene ya da 182 ALO Sağlık Hattı'nı arayabilirsin.
             """
 
         case .districtsNotFound:

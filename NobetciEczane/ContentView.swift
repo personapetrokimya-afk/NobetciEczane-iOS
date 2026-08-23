@@ -63,6 +63,44 @@ struct ContentView: View {
         }
     }
 
+    /// Nöbetçiler, bölgelerine (ilçe) göre gruplanır. Gruplar, içlerindeki
+    /// EN YAKIN eczaneye göre sıralanır; grup içi sıra da en yakından en uzağa.
+    private var dutyGroups: [(name: String, pharmacies: [Pharmacy])] {
+
+        var order: [String] = []
+        var names: [String: String] = [:]
+        var buckets: [String: [Pharmacy]] = [:]
+
+        // visibleDuty zaten mesafeye göre sıralı geldiği için
+        // grupların ve grup içlerinin sırası kendiliğinden doğru olur.
+        //
+        // Gruplama NORMALİZE edilmiş ada göre yapılır: kaynaklardan biri
+        // "Cigli", diğeri "Çiğli" yazsa da aynı bölgede toplanırlar.
+        for pharmacy in visibleDuty {
+
+            let raw = pharmacy.district?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let key = raw.isEmpty ? "-" : PharmacyText.normalize(raw)
+
+            if buckets[key] == nil {
+                order.append(key)
+
+                names[key] = raw.isEmpty
+                    ? "Diğer"
+                    : raw.capitalized(with: Locale(identifier: "tr_TR"))
+            }
+
+            // Türkçe karakterli yazım varsa görünen ad olarak onu tercih et.
+            if !raw.isEmpty,
+               raw.rangeOfCharacter(from: CharacterSet(charactersIn: "çğıöşüÇĞİÖŞÜ")) != nil {
+                names[key] = raw.capitalized(with: Locale(identifier: "tr_TR"))
+            }
+
+            buckets[key, default: []].append(pharmacy)
+        }
+
+        return order.map { (names[$0] ?? "Diğer", buckets[$0] ?? []) }
+    }
+
     private var hasResults: Bool {
         !visibleDuty.isEmpty || !visibleOpen.isEmpty
     }
@@ -214,30 +252,42 @@ struct ContentView: View {
         NavigationStack {
             List {
 
-                // 1) NÖBETÇİLER — yalnızca o gün nöbetçi olanlar.
+                // 1) NÖBETÇİLER — yalnızca o gün nöbetçi olanlar, bölge bölge.
                 Section {
                     if visibleDuty.isEmpty {
                         Text(dutyNote ?? "Bu bölge için bugünün nöbet listesi alınamadı.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(visibleDuty) { pharmacy in
-                            PharmacyRow(
-                                pharmacy: pharmacy,
-                                distanceText: formattedDistance(pharmacy)
-                            )
-                        }
                     }
                 } header: {
                     Label(
                         visibleDuty.isEmpty
                             ? "Nöbetçiler"
-                            : "Nöbetçiler · \(visibleDuty.count)",
+                            : "Nöbetçiler · \(visibleDuty.count) eczane",
                         systemImage: "moon.stars.fill"
                     )
                 } footer: {
                     if !visibleDuty.isEmpty {
-                        Text("Bugünün resmî nöbet listesi. Gece de açıktır.")
+                        Text("Bugünün resmî nöbet listesi, bölgelere göre. "
+                             + "20 km içindeki en yakın \(visibleDuty.count) eczane. Gece de açıktır.")
+                    }
+                }
+
+                // Her bölge (ilçe) kendi başlığı altında: "Menemen · 2 nöbetçi".
+                ForEach(dutyGroups, id: \.name) { group in
+                    Section {
+                        ForEach(group.pharmacies) { pharmacy in
+                            PharmacyRow(
+                                pharmacy: pharmacy,
+                                distanceText: formattedDistance(pharmacy)
+                            )
+                        }
+                    } header: {
+                        Label(
+                            "\(group.name) · \(group.pharmacies.count) nöbetçi",
+                            systemImage: "mappin.and.ellipse"
+                        )
+                        .foregroundStyle(.green)
                     }
                 }
 

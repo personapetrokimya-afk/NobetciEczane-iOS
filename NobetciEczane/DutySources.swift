@@ -11,27 +11,58 @@ import Foundation
 ///                        aynı eczaneyi bildirerek güven puanını yükseltir.
 ///
 /// Böylece bir sitenin menü/SSS/footer metinleri listeye "eczane" diye sızamaz.
+
+/// Bir kaynağın "bu liste gerçekten BUGÜNE ait" güvencesinin seviyesi.
+///
+/// ÖNEMLİ AYRIM: sayfaya bugünün tarihini YAZMAK, listenin bugüne ait olduğunu
+/// KANITLAMAZ. (eczaneadresi.com "23 Ağustos" yazıp dünün nöbetçisini servis
+/// edebiliyor — kullanıcıya kapalı eczane gösterilmesinin sebebi buydu.)
+/// Gerçek kanıt, tarihli DÖNEM BAŞLIĞI ile eşleşmektir.
+enum DayConfidence: Int, Comparable {
+
+    /// Hiçbir gün bilgisi yok.
+    case none = 0
+
+    /// Sayfada bugünün tarihi yazıyor (zayıf güvence — bayat olabilir).
+    case dateOnly = 1
+
+    /// Liste, bugünle eşleşen tarihli dönem başlığının altından okundu (kanıtlı).
+    case period = 2
+
+    static func < (lhs: DayConfidence, rhs: DayConfidence) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+
 enum DutySource: String, CaseIterable {
 
     // --- Listeyi üretebilen (doğrulanmış) kaynaklar ---
-    case eczanelerGenTr   = "eczaneler.gen.tr"
-    case eczaneAdresi     = "eczaneadresi.com"
-    case eczanelerOrg     = "eczaneler.org"
-    case enYakinEczane    = "nobetcienyakineczane.com"
+    case eczanelerGenTr    = "eczaneler.gen.tr"
+    case eczanelerOrg      = "eczaneler.org"
+    case enYakinEczane     = "nobetcienyakineczane.com"
+    case milliyet          = "milliyet.com.tr"
+    case sabah             = "sabah.com.tr"
+    case nobetciEczaneleri = "nobetcieczaneleri.com"
+    case enYakinEczaneTr   = "enyakineczane.com.tr"
+    case eczaneAdresi      = "eczaneadresi.com"
 
     // --- Yalnızca doğrulama / tamamlama kaynakları ---
-    case nobetciEczaneNet = "nobetcieczane.net"
-    case trNobetciEczane  = "trnobetcieczane.com"
-    case hastanemYanimda  = "hastanemyanimda.com"
-    case nobetciEczaneniz = "nobetcieczaneniz.com"
-    case eczaneleriNet    = "eczaneleri.net"
-    case nobetciBugun     = "nobetcieczanebugun.com"
+    case nobetciEczaneNet  = "nobetcieczane.net"
+    case trNobetciEczane   = "trnobetcieczane.com"
+    case hastanemYanimda   = "hastanemyanimda.com"
+    case nobetciEczaneniz  = "nobetcieczaneniz.com"
+    case eczaneleriNet     = "eczaneleri.net"
+    case nobetciBugun      = "nobetcieczanebugun.com"
+    case eczaneleriOrgIl   = "eczaneleri.org (il sitesi)"
 
 
     /// Bu kaynak listeyi tek başına üretebilir mi?
     var leading: Bool {
         switch self {
-        case .eczanelerGenTr, .eczaneAdresi, .eczanelerOrg, .enYakinEczane:
+        case .eczanelerGenTr, .eczanelerOrg, .enYakinEczane,
+             .milliyet, .sabah, .nobetciEczaneleri,
+             .enYakinEczaneTr, .eczaneAdresi:
             return true
         default:
             return false
@@ -43,16 +74,21 @@ enum DutySource: String, CaseIterable {
     /// kaynağın kayıtları üzerine kurulur.
     var priority: Int {
         switch self {
-        case .eczanelerGenTr:   return 0
-        case .eczaneAdresi:     return 1
-        case .eczanelerOrg:     return 2
-        case .enYakinEczane:    return 3
-        case .nobetciEczaneNet: return 4
-        case .trNobetciEczane:  return 5
-        case .hastanemYanimda:  return 6
-        case .nobetciEczaneniz: return 7
-        case .eczaneleriNet:    return 8
-        case .nobetciBugun:     return 9
+        case .eczanelerGenTr:    return 0
+        case .eczanelerOrg:      return 1
+        case .enYakinEczane:     return 2
+        case .milliyet:          return 3
+        case .sabah:             return 4
+        case .nobetciEczaneleri: return 5
+        case .enYakinEczaneTr:   return 6
+        case .eczaneAdresi:      return 7   // Tarihi doğru yazıp bayat liste servis edebildiği görüldü.
+        case .nobetciEczaneNet:  return 8
+        case .trNobetciEczane:   return 9
+        case .hastanemYanimda:   return 10
+        case .nobetciEczaneniz:  return 11
+        case .eczaneleriNet:     return 12
+        case .nobetciBugun:      return 13
+        case .eczaneleriOrgIl:   return 14
         }
     }
 
@@ -172,6 +208,58 @@ enum DutySource: String, CaseIterable {
                     "https://nobetcieczanebugun.com/\(citySlug)-nobetci-eczane"
                 ]
             }
+
+        case .milliyet:
+            if let district {
+                strings = [
+                    "https://www.milliyet.com.tr/nobetci-eczaneler/\(citySlug)/\(district)/",
+                    "https://www.milliyet.com.tr/nobetci-eczaneler/\(citySlug)/"
+                ]
+            } else {
+                strings = ["https://www.milliyet.com.tr/nobetci-eczaneler/\(citySlug)/"]
+            }
+
+        case .sabah:
+            if let district {
+                strings = [
+                    "https://www.sabah.com.tr/\(citySlug)-\(district)-nobetci-eczaneler",
+                    "https://www.sabah.com.tr/\(citySlug)-nobetci-eczaneler"
+                ]
+            } else {
+                strings = ["https://www.sabah.com.tr/\(citySlug)-nobetci-eczaneler"]
+            }
+
+        case .nobetciEczaneleri:
+            if let district {
+                strings = [
+                    "https://nobetcieczaneleri.com/\(citySlug)/\(district)/bugun",
+                    "https://nobetcieczaneleri.com/\(citySlug)/bugun"
+                ]
+            } else {
+                strings = ["https://nobetcieczaneleri.com/\(citySlug)/bugun"]
+            }
+
+        case .enYakinEczaneTr:
+            if let district {
+                strings = [
+                    "https://enyakineczane.com.tr/\(citySlug)-\(district)-nobetci-eczane",
+                    "https://enyakineczane.com.tr/\(citySlug)-nobetci-eczane"
+                ]
+            } else {
+                strings = ["https://enyakineczane.com.tr/\(citySlug)-nobetci-eczane"]
+            }
+
+        case .eczaneleriOrgIl:
+            // İl alt alan adı: izmir.eczaneleri.org. Sayfa 3 günlük liste yayınlar;
+            // "leading" DEĞİLDİR, yalnızca bugünkü kayıtları teyit eder.
+            if let district {
+                strings = [
+                    "https://\(citySlug).eczaneleri.org/\(district)/nobetci-eczaneler.html",
+                    "https://\(citySlug).eczaneleri.org/nobetci-eczaneler.html"
+                ]
+            } else {
+                strings = ["https://\(citySlug).eczaneleri.org/nobetci-eczaneler.html"]
+            }
         }
 
         return strings.compactMap { URL(string: $0) }
@@ -183,6 +271,9 @@ enum DutySource: String, CaseIterable {
 struct CrossCheckResult {
 
     var pharmacies: [Pharmacy] = []
+
+    /// Listeyi kuran ana kaynağın gün güvencesi.
+    var dayConfidence: DayConfidence = .none
 
     /// Yanıt veren kaynaklar.
     var succeeded: [String] = []
@@ -203,9 +294,8 @@ extension DutyPharmacyService {
 
         let pharmacies: [Pharmacy]
 
-        /// Kaynak, listenin BUGÜNE ait olduğunu kanıtladı mı?
-        /// (Dönem başlığı bugünle eşleşti ya da sayfada bugünün tarihi geçiyor.)
-        let dayVerified: Bool
+        /// Listenin BUGÜNE ait olduğuna dair güvence seviyesi.
+        let confidence: DayConfidence
 
         let failure: String?
     }
@@ -242,21 +332,21 @@ extension DutyPharmacyService {
                         return SourceOutcome(
                             source: source,
                             pharmacies: found.pharmacies,
-                            dayVerified: found.dayVerified,
+                            confidence: found.confidence,
                             failure: nil
                         )
                     } catch let error as ServiceError {
                         return SourceOutcome(
                             source: source,
                             pharmacies: [],
-                            dayVerified: false,
+                            confidence: .none,
                             failure: error.diagnosticText
                         )
                     } catch {
                         return SourceOutcome(
                             source: source,
                             pharmacies: [],
-                            dayVerified: false,
+                            confidence: .none,
                             failure: error.localizedDescription
                         )
                     }
@@ -273,10 +363,15 @@ extension DutyPharmacyService {
 
         var result = CrossCheckResult()
 
-        // 1) Listeyi kuracak ana kaynak: doğrulanmış, günü kanıtlamış ve dolu.
-        guard let base = outcomes.first(where: {
-            $0.source.leading && $0.dayVerified && !$0.pharmacies.isEmpty
-        }) else {
+        // 1) Listeyi kuracak ana kaynak. Önce dönem başlığı KANITLI kaynak aranır;
+        //    yoksa en azından bugünün tarihini yazan doğrulanmış kaynağa düşülür.
+        let base = outcomes.first(where: {
+            $0.source.leading && $0.confidence == .period && !$0.pharmacies.isEmpty
+        }) ?? outcomes.first(where: {
+            $0.source.leading && $0.confidence >= .dateOnly && !$0.pharmacies.isEmpty
+        })
+
+        guard let base else {
 
             for item in outcomes {
                 let reason: String
@@ -284,7 +379,7 @@ extension DutyPharmacyService {
                     reason = failure
                 } else if item.pharmacies.isEmpty {
                     reason = "kayıt yok"
-                } else if !item.dayVerified {
+                } else if item.confidence == .none {
                     reason = "\(item.pharmacies.count) kayıt ama günü doğrulanamadı"
                 } else {
                     reason = "\(item.pharmacies.count) kayıt (yalnızca doğrulama)"
@@ -297,11 +392,7 @@ extension DutyPharmacyService {
 
         result.succeeded.append(base.source.rawValue)
         result.pharmacies = base.pharmacies
-
-        // Günü kanıtlamış kaynaklar: ek kayıt ancak bunlardan biriyle doğrulanabilir.
-        let verifiedSources = Set(
-            outcomes.filter { $0.dayVerified }.map { $0.source.rawValue }
-        )
+        result.dayConfidence = base.confidence
 
         // 2) Kalan kaynaklarla doğrula / tamamla.
         var extraCandidates: [String: Pharmacy] = [:]
@@ -364,16 +455,31 @@ extension DutyPharmacyService {
             }
         }
 
-        // 3) İki ve daha fazla kaynağın doğruladığı ek kayıtlar listeye girer;
-        //    en az biri günü kanıtlamış olmalıdır.
-        for key in extraOrder {
+        // 3) Ek kayıt kuralı — SAYDAM VAKASI:
+        //    İki bayat site aynı yanlış eczanede anlaşınca "2 kaynak söylüyor"
+        //    kuralı deliniyor ve nöbetçi olmayan eczane listeye giriyordu.
+        //
+        //    Yeni kural: Ana liste tarihli dönem başlığıyla KANITLIYSA (.period),
+        //    o liste resmî listedir — diğer kaynaklar ona kayıt EKLEYEMEZ,
+        //    yalnızca telefon/koordinat tamamlar. Kanıtlı kaynak yoksa ek kayıt,
+        //    ancak İKİ AYRI doğrulanmış (leading + tarih yazan) kaynağın
+        //    anlaşmasıyla girebilir; bir leading + bir bayat site yetmez.
+        if result.dayConfidence < .period {
 
-            guard let candidate = extraCandidates[key],
-                  candidate.sources.count >= 2,
-                  candidate.sources.contains(where: { verifiedSources.contains($0) })
-            else { continue }
+            let trustedLeading = Set(
+                outcomes
+                    .filter { $0.source.leading && $0.confidence >= .dateOnly }
+                    .map { $0.source.rawValue }
+            )
 
-            result.pharmacies.append(candidate)
+            for key in extraOrder {
+
+                guard let candidate = extraCandidates[key],
+                      candidate.sources.filter({ trustedLeading.contains($0) }).count >= 2
+                else { continue }
+
+                result.pharmacies.append(candidate)
+            }
         }
 
         return result
@@ -381,14 +487,13 @@ extension DutyPharmacyService {
 
 
     /// Bir kaynaktan bugünün nöbetçi listesini çeker.
-    /// `dayVerified`, listenin gerçekten BUGÜNE ait olduğunun kanıtlanıp
-    /// kanıtlanamadığını söyler.
+    /// `confidence`, listenin gerçekten BUGÜNE ait olduğu güvencesinin seviyesidir.
     func fetch(
         from source: DutySource,
         citySlug: String,
         districtSlug: String?,
         districtName: String?
-    ) async throws -> (pharmacies: [Pharmacy], dayVerified: Bool) {
+    ) async throws -> (pharmacies: [Pharmacy], confidence: DayConfidence) {
 
         var lastError: ServiceError = .sourceUnavailable(detail: "bilinmiyor")
 
@@ -397,8 +502,9 @@ extension DutyPharmacyService {
             do {
                 let html = try await fetchHTML(from: url)
 
-                // Sayfada bugünün tarihi geçiyor mu? (Gün doğrulamasının temeli.)
-                var dayVerified = pageMentionsToday(html)
+                // Sayfada bugünün tarihi geçiyor mu? (Zayıf güvence: tarih yazmak
+                // listenin taze olduğunu kanıtlamaz, sadece hiç yoktan iyidir.)
+                var confidence: DayConfidence = pageMentionsToday(html) ? .dateOnly : .none
 
                 var section = html
                 var dutyEndsAt = PharmacyHours.dutyEnd(
@@ -417,7 +523,7 @@ extension DutyPharmacyService {
                     section = today.html
                     dutyEndsAt = today.endsAt ?? dutyEndsAt
 
-                    if today.matchedPeriod { dayVerified = true }
+                    if today.matchedPeriod { confidence = .period }
                 }
 
                 // Nöbet penceresi kapandıysa bu liste ARTIK GEÇERSİZDİR.
@@ -440,8 +546,8 @@ extension DutyPharmacyService {
                 }
 
                 if !found.isEmpty {
-                    log("💊 \(url.absoluteString) -> \(found.count) kayıt, gün doğrulandı: \(dayVerified)")
-                    return (removeDuplicates(found), dayVerified)
+                    log("💊 \(url.absoluteString) -> \(found.count) kayıt, gün güvencesi: \(confidence)")
+                    return (removeDuplicates(found), confidence)
                 }
 
                 // Sayfa geldi ama hiç kayıt çıkmadı: ağ değil, ayrıştırma sorunu.
