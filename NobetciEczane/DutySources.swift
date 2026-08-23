@@ -369,12 +369,19 @@ extension DutyPharmacyService {
             return cached
         }
 
+        // KADEMELİ TARAMA: önce en güvenilir 3 kaynak sorgulanır. Çapraz
+        // eşleşme bu üçlüden çıkarsa (tipik durum) diğer 12 siteye HİÇ istek
+        // atılmaz — veri, pil ve işlemci tasarrufu. Üçlü yetmezse ya da
+        // 2,5 saniye içinde sonuç bağlanamazsa kalan kaynaklar devreye girer.
+        let firstWave: [DutySource] = [.eczanelerGenTr, .eczanelerOrg, .enYakinEczane]
+        let secondWave = DutySource.allCases.filter { !firstWave.contains($0) }
+
         let fresh: CrossCheckResult = await withTaskGroup(
-            of: SourceOutcome.self,
+            of: SourceOutcome?.self,
             returning: CrossCheckResult.self
         ) { group in
 
-            for source in DutySource.allCases {
+            func launch(_ source: DutySource) {
                 group.addTask {
                     do {
                         let found = try await self.fetch(
@@ -407,11 +414,37 @@ extension DutyPharmacyService {
                 }
             }
 
+            for source in firstWave { launch(source) }
+
+            // Emniyet zamanlayıcısı: ilk dalga 2,5 sn içinde bağlanamazsa
+            // (örn. gen.tr yavaş) ikinci dalga beklenmeden başlatılır.
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                return nil
+            }
+
             var outcomes: [SourceOutcome] = []
+            var firstWaveDone = 0
+            var secondWaveLaunched = false
+
+            func launchSecondWave() {
+                guard !secondWaveLaunched else { return }
+                secondWaveLaunched = true
+                log("🌊 İkinci dalga: \(secondWave.count) kaynak devrede")
+                for source in secondWave { launch(source) }
+            }
 
             for await item in group {
 
+                guard let item else {
+                    // Zamanlayıcı doldu: ilk dalga hâlâ bağlayamadıysa genişle.
+                    launchSecondWave()
+                    continue
+                }
+
                 outcomes.append(item)
+
+                if firstWave.contains(item.source) { firstWaveDone += 1 }
 
                 // ERKEN BİTİŞ: kanıtlı ana liste geldi ve bütün kayıtları
                 // en az bir başka kaynakça doğrulandıysa gerisini bekleme.
@@ -426,6 +459,11 @@ extension DutyPharmacyService {
                     group.cancelAll()
                     log("⚡️ Erken bitiş: \(candidate.succeeded.joined(separator: ", "))")
                     return candidate
+                }
+
+                // İlk dalganın üçü de yanıtladı ama sonuç bağlanamadı: genişle.
+                if firstWaveDone == firstWave.count {
+                    launchSecondWave()
                 }
             }
 
