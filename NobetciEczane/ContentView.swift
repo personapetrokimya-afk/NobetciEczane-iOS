@@ -324,7 +324,7 @@ struct ContentView: View {
             .navigationTitle("Eczaneler")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Yenile", action: search).disabled(isLoading)
+                    Button("Yenile") { search(force: true) }.disabled(isLoading)
                 }
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -410,6 +410,10 @@ struct ContentView: View {
     // MARK: - Arama
 
     private func search() {
+        search(force: false)
+    }
+
+    private func search(force: Bool) {
 
         guard phase == .idle else { return }
 
@@ -417,19 +421,36 @@ struct ContentView: View {
         dutyNote = nil
 
         // Önce konum. Konum tam olarak gelmeden arama BAŞLAMAZ.
+        // (Son 2 dk içinde isabetli ölçüm varsa GPS beklenmez, anında döner.)
         phase = .locating
 
         Task {
             do {
                 let location = try await locationManager.requestCurrentLocation()
 
-                // Konum bir kez çözülür; hem rozet hem arama aynı sonucu kullanır.
-                let place = await service.detectPlace(for: location)
+                // İl/ilçe açılışta zaten çözüldüyse yeniden ÇÖZMEYİ BEKLEME:
+                // aramayı hemen başlat, rozeti arka planda tazele.
+                let place: (city: String, district: String?)?
 
-                if let place {
-                    await MainActor.run {
-                        detectedCity = place.city
-                        detectedDistrict = place.district
+                if let detectedCity {
+                    place = (detectedCity, detectedDistrict)
+
+                    Task {
+                        if let fresh = await service.detectPlace(for: location) {
+                            await MainActor.run {
+                                self.detectedCity = fresh.city
+                                self.detectedDistrict = fresh.district
+                            }
+                        }
+                    }
+                } else {
+                    place = await service.detectPlace(for: location)
+
+                    if let place {
+                        await MainActor.run {
+                            detectedCity = place.city
+                            detectedDistrict = place.district
+                        }
                     }
                 }
 
@@ -448,7 +469,8 @@ struct ContentView: View {
                 do {
                     duty = try await service.fetchNearest(
                         to: location,
-                        knownPlace: place
+                        knownPlace: place,
+                        forceRefresh: force
                     )
                 } catch {
                     note = error.localizedDescription

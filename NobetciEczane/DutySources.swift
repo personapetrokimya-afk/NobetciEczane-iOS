@@ -267,6 +267,41 @@ enum DutySource: String, CaseIterable {
 }
 
 
+/// Günlük sonuç önbelleği.
+///
+/// Nöbet listesi gün içinde değişmez (devir sabah 09:00'da). Aynı il/ilçe için
+/// tekrar arama yapıldığında 15 sorguyu yeniden koşturmak yerine bellekteki
+/// sonuç kullanılır: tekrar aramalar ANINDA açılır. Anahtar nöbet gününü de
+/// içerdiği için 09:00 devrinde önbellek kendiliğinden geçersizleşir.
+actor DutyResultCache {
+
+    static let shared = DutyResultCache()
+
+    /// Kaynaklardaki olası düzeltmeleri kaçırmamak için üst yaş sınırı.
+    private let maxAge: TimeInterval = 15 * 60
+
+    private var store: [String: (result: CrossCheckResult, at: Date)] = [:]
+
+    func value(for key: String) -> CrossCheckResult? {
+
+        guard let entry = store[key],
+              -entry.at.timeIntervalSinceNow < maxAge else {
+            return nil
+        }
+
+        return entry.result
+    }
+
+    func set(_ result: CrossCheckResult, for key: String) {
+        store[key] = (result, Date())
+    }
+
+    func clear() {
+        store.removeAll()
+    }
+}
+
+
 /// Çapraz sorgu sonucu.
 struct CrossCheckResult {
 
@@ -316,10 +351,25 @@ extension DutyPharmacyService {
     func fetchCrossChecked(
         citySlug: String,
         districtSlug: String?,
-        districtName: String?
+        districtName: String?,
+        bypassCache: Bool = false
     ) async -> CrossCheckResult {
 
-        await withTaskGroup(
+        // Aynı gün + aynı bölge için sonuç zaten alınmışsa ağı hiç kullanma.
+        let cacheKey = [
+            dutyDateKey(for: PharmacyHours.currentDutyDate()),
+            citySlug,
+            districtSlug ?? "-"
+        ].joined(separator: "|")
+
+        if !bypassCache,
+           let cached = await DutyResultCache.shared.value(for: cacheKey),
+           !cached.isEmpty {
+            log("🗄️ Önbellekten: \(cacheKey)")
+            return cached
+        }
+
+        let fresh: CrossCheckResult = await withTaskGroup(
             of: SourceOutcome.self,
             returning: CrossCheckResult.self
         ) { group in
@@ -381,6 +431,13 @@ extension DutyPharmacyService {
 
             return assembleCrossCheck(outcomes)
         }
+
+        // Yalnızca işe yarar (dolu) sonuç önbelleğe alınır.
+        if !fresh.isEmpty {
+            await DutyResultCache.shared.set(fresh, for: cacheKey)
+        }
+
+        return fresh
     }
 
 

@@ -26,11 +26,32 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         authorizationStatus = manager.authorizationStatus
     }
 
+    /// Bu kadar yeni ve isabetli bir ölçüm varsa GPS'i yeniden beklemeye gerek yok.
+    private let reuseWindow: TimeInterval = 120
+    private let reuseAccuracy: CLLocationAccuracy = 300
+
     /// Cihazdan güncel konumu ister.
     /// Halihazırda bir ölçüm sürüyorsa hata vermez; o ölçümü BEKLER.
+    /// Son 2 dakika içinde alınmış isabetli bir ölçüm varsa GPS beklemeden
+    /// HEMEN onu döndürür (eczane araması için 300 m hassasiyet fazlasıyla yeterli);
+    /// arka planda yine de taze ölçüm başlatır ki rozet güncel kalsın.
     func requestCurrentLocation() async throws -> CLLocation {
 
         try await ensureAuthorization()
+
+        if let cached = location,
+           -cached.timestamp.timeIntervalSinceNow < reuseWindow,
+           cached.horizontalAccuracy >= 0,
+           cached.horizontalAccuracy <= reuseAccuracy {
+
+            // Taze ölçümü arka planda başlat; bekletme.
+            if !isLocating {
+                isLocating = true
+                manager.requestLocation()
+            }
+
+            return cached
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
 

@@ -60,7 +60,8 @@ struct DutyPharmacyService {
         to location: CLLocation,
         limit: Int = 15,
         maxDistance: CLLocationDistance = 20_000,
-        knownPlace: (city: String, district: String?)? = nil
+        knownPlace: (city: String, district: String?)? = nil,
+        forceRefresh: Bool = false
     ) async throws -> [Pharmacy] {
 
         // Konum zaten çözülmüşse (arayüz açılışta çözüyor) yeniden çözme:
@@ -94,14 +95,16 @@ struct DutyPharmacyService {
             return await self.fetchCrossChecked(
                 citySlug: citySlug,
                 districtSlug: self.slug(district),
-                districtName: district
+                districtName: district,
+                bypassCache: forceRefresh
             )
         }()
 
         async let cityTask = fetchCrossChecked(
             citySlug: citySlug,
             districtSlug: nil,
-            districtName: nil
+            districtName: nil,
+            bypassCache: forceRefresh
         )
 
         var result = await districtTask ?? CrossCheckResult()
@@ -161,8 +164,12 @@ struct DutyPharmacyService {
 
         log("✅ Kaynaklar: \(result.succeeded.joined(separator: ", ")) — \(confirmed.count)/\(active.count) kayıt çapraz doğrulandı")
 
-        // Koordinatı hiçbir kaynaktan çıkmayan kayıtlar adresten tamamlanır.
-        let enriched = await enrichMissingCoordinates(confirmed, city: city)
+        // Önce kaba sıralama: koordinatı bilinenler mesafeye göre, bilinmeyenler sona.
+        // Geocode (adres -> koordinat) yalnızca LİSTEYE GİREBİLECEK kayıtlara yapılır;
+        // il genelindeki onlarca uzak kaydı çözümleyip zaman kaybedilmez.
+        let shortlist = Array(sort(confirmed, around: location).prefix(limit + 5))
+
+        let enriched = await enrichMissingCoordinates(shortlist, city: city)
 
         // 20 km'den uzak eczane gösterilmez. Koordinatı çözülemeyen kayıt
         // (mesafesi bilinmiyor) elenmez; sıralamada en sona düşer.
