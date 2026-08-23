@@ -103,7 +103,7 @@ struct DistrictListView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
 
-    private let service = DutyPharmacyService()
+    private let service = DutyPharmacyService.shared
 
     var body: some View {
         List {
@@ -181,6 +181,7 @@ struct DistrictListView: View {
         }
     }
 
+    @MainActor
     private func load() async {
 
         guard districts.isEmpty else { return }
@@ -213,7 +214,7 @@ struct DutyListView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
 
-    private let service = DutyPharmacyService()
+    private let service = DutyPharmacyService.shared
 
     var body: some View {
         List {
@@ -248,7 +249,13 @@ struct DutyListView: View {
                         )
                     }
                 } header: {
-                    Text("\(subtitle) · bugün nöbetçi \(pharmacies.count) eczane")
+                    Label(
+                        "Nöbetçiler · \(pharmacies.count)",
+                        systemImage: "moon.stars.fill"
+                    )
+                } footer: {
+                    Text("\(subtitle) · bugünün resmî nöbet listesi. "
+                         + "Yakınındaki ŞU AN AÇIK eczaneler için ana ekrandaki aramayı kullan.")
                 }
             }
         }
@@ -259,6 +266,7 @@ struct DutyListView: View {
         }
     }
 
+    @MainActor
     private func load(force: Bool) async {
 
         if !force, !pharmacies.isEmpty { return }
@@ -290,6 +298,7 @@ struct DutyListView: View {
         isLoading = false
     }
 
+    @MainActor
     private func distanceText(for pharmacy: Pharmacy) -> String? {
 
         guard let location = locationManager.location,
@@ -341,6 +350,11 @@ struct PharmacyRow: View {
 
     @State private var showMapPicker = false
 
+    /// Nöbetçi = yeşil, şu an açık = mavi.
+    private var accentColor: Color {
+        pharmacy.kind == .duty ? .green : .blue
+    }
+
     /// Telefonda kurulu harita uygulamaları.
     private var mapApps: [MapApp] { MapApp.installed }
 
@@ -350,11 +364,13 @@ struct PharmacyRow: View {
             // --- Gövde: her yerine dokunulunca haritada yol tarifi açılır ---
             HStack(spacing: 14) {
 
-                Image(systemName: "cross.case.fill")
+                Image(systemName: pharmacy.kind == .duty
+                      ? "moon.stars.fill"
+                      : "cross.case.fill")
                     .font(.title3)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(accentColor)
                     .frame(width: 38, height: 38)
-                    .background(.green.opacity(0.12), in: Circle())
+                    .background(accentColor.opacity(0.12), in: Circle())
 
                 VStack(alignment: .leading, spacing: 4) {
 
@@ -368,6 +384,20 @@ struct PharmacyRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
+
+                    // Açıklık durumu: "Nöbetçi · yarın 09:00'a kadar açık" /
+                    // "Şu an açık · 19:00'a kadar açık"
+                    HStack(spacing: 6) {
+
+                        Image(systemName: pharmacy.isClosingSoon
+                              ? "exclamationmark.triangle.fill"
+                              : "clock.fill")
+                            .font(.caption2)
+
+                        Text(pharmacy.availabilityText)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(pharmacy.isClosingSoon ? Color.orange : accentColor)
 
                     HStack(spacing: 10) {
 

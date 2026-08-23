@@ -1,11 +1,19 @@
 import SwiftUI
 import MapKit
 import UIKit
+import Combine
 
 struct ContentView: View {
+
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var locationManager = LocationManager()
-    @State private var pharmacies: [Pharmacy] = []
+
+    /// Bugün NÖBETÇİ olan eczaneler.
+    @State private var dutyPharmacies: [Pharmacy] = []
+
+    /// Nöbetçi olmayan ama ŞU AN açık olan yakın eczaneler.
+    @State private var openPharmacies: [Pharmacy] = []
+
     @State private var phase: SearchPhase = .idle
 
     enum SearchPhase {
@@ -15,13 +23,49 @@ struct ContentView: View {
     }
 
     private var isLoading: Bool { phase != .idle }
+
     @State private var errorMessage: String?
+    @State private var dutyNote: String?
     @State private var hasSearched = false
     @State private var showPlaceSheet = false
     @State private var detectedCity: String?
     @State private var detectedDistrict: String?
 
-    private let service = DutyPharmacyService()
+    private let service = DutyPharmacyService.shared
+    private let nearbyFinder = NearbyOpenPharmacyFinder()
+
+    /// Liste ekranda dururken saat ilerler. Bu değer dakikada bir tazelenir ve
+    /// süzgeçleri yeniden çalıştırır: 19:00'da kapanan eczane 19:00'da listeden düşer.
+    @State private var now = Date()
+    @State private var lastSearch: Date?
+
+    private let clock = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+
+    /// Nöbeti hâlâ süren kayıtlar.
+    private var visibleDuty: [Pharmacy] {
+        dutyPharmacies.filter {
+            PharmacyHours.isDutyStillActive(endsAt: $0.dutyEndsAt, now: now)
+        }
+    }
+
+    /// Mesaisi hâlâ süren kayıtlar. Mesai bittiyse bölüm tamamen kaybolur.
+    private var visibleOpen: [Pharmacy] {
+
+        guard PharmacyHours.isOpenNow(now) else { return [] }
+
+        return openPharmacies.filter { pharmacy in
+
+            guard let closesAt = pharmacy.closesAt else { return true }
+
+            let margin = Double(PharmacyHours.closingSafetyMinutes * 60)
+
+            return now < closesAt.addingTimeInterval(-margin)
+        }
+    }
+
+    private var hasResults: Bool {
+        !visibleDuty.isEmpty || !visibleOpen.isEmpty
+    }
 
     var body: some View {
         ZStack {
@@ -32,7 +76,7 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
 
-            if hasSearched && !pharmacies.isEmpty {
+            if hasSearched && hasResults {
                 resultsView
             } else {
                 homeView
@@ -42,10 +86,22 @@ struct ContentView: View {
             // Uygulama her açıldığında cihazdan güncel konum istenir.
             await refreshLocationOnEntry()
         }
+        .onReceive(clock) { tick in
+            now = tick
+        }
         .onChange(of: scenePhase) { newScenePhase in
-            // Arka plandan tekrar uygulamaya gelindiğinde de konumu tazele.
+            // Arka plandan tekrar uygulamaya gelindiğinde konumu ve saati tazele.
             if newScenePhase == .active {
+                now = Date()
                 Task { await refreshLocationOnEntry() }
+
+                // Ekrandaki liste bayatladıysa (5 dk) sessizce yenile:
+                // saat 09:00'ı geçmişse nöbet devretmiş olabilir.
+                if hasSearched,
+                   let lastSearch,
+                   Date().timeIntervalSince(lastSearch) > 300 {
+                    search()
+                }
             }
         }
         .alert(
@@ -144,35 +200,87 @@ struct ContentView: View {
 
                 Text("Developed by D.Y.")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary.opacity(0.7))
+                    .foregroundStyle(Color.secondary.opacity(0.7))
             }
             .padding(.bottom, 18)
         }
         .padding()
     }
 
+
+    // MARK: - Sonuç listesi (iki başlık)
+
     private var resultsView: some View {
         NavigationStack {
             List {
+
+                // 1) NÖBETÇİLER — yalnızca o gün nöbetçi olanlar.
                 Section {
-                    ForEach(pharmacies) { pharmacy in
-                        PharmacyRow(
-                            pharmacy: pharmacy,
-                            distanceText: formattedDistance(pharmacy)
-                        )
+                    if visibleDuty.isEmpty {
+                        Text(dutyNote ?? "Bu bölge için bugünün nöbet listesi alınamadı.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(visibleDuty) { pharmacy in
+                            PharmacyRow(
+                                pharmacy: pharmacy,
+                                distanceText: formattedDistance(pharmacy)
+                            )
+                        }
                     }
                 } header: {
-                    Text("En yakından en uzağa · \(pharmacies.count) nöbetçi eczane")
+                    Label(
+                        visibleDuty.isEmpty
+                            ? "Nöbetçiler"
+                            : "Nöbetçiler · \(visibleDuty.count)",
+                        systemImage: "moon.stars.fill"
+                    )
+                } footer: {
+                    if !visibleDuty.isEmpty {
+                        Text("Bugünün resmî nöbet listesi. Gece de açıktır.")
+                    }
+                }
+
+                // 2) ŞU AN AÇIK OLAN ECZANELER — mesai içindeyse gösterilir.
+                if !visibleOpen.isEmpty {
+                    Section {
+                        ForEach(visibleOpen) { pharmacy in
+                            PharmacyRow(
+                                pharmacy: pharmacy,
+                                distanceText: formattedDistance(pharmacy)
+                            )
+                        }
+                    } header: {
+                        Label(
+                            "Şu an açık eczaneler · \(visibleOpen.count)",
+                            systemImage: "sun.max.fill"
+                        )
+                    } footer: {
+                        Text(openNowFooter)
+                    }
+                }
+
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .foregroundStyle(.green)
+                        Text("Kapalı eczaneler listelenmez. Türkiye saati: "
+                             + PharmacyHours.timeText(now))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Nöbetçi Eczaneler")
+            .navigationTitle("Eczaneler")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Yenile", action: search).disabled(isLoading)
                 }
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
-                        pharmacies = []
+                        dutyPharmacies = []
+                        openPharmacies = []
+                        dutyNote = nil
                         hasSearched = false
                     } label: {
                         Image(systemName: "xmark")
@@ -181,6 +289,19 @@ struct ContentView: View {
             }
         }
     }
+
+
+    private var openNowFooter: String {
+
+        guard let closing = PharmacyHours.closingDate(Date()) else {
+            return "Nöbetçi olmayan, normal mesaisiyle açık eczaneler."
+        }
+
+        return "Nöbetçi değiller; standart mesai bitiminde "
+            + "(\(PharmacyHours.timeText(closing))) kapanırlar. "
+            + "Yola çıkmadan aramanız iyi olur."
+    }
+
 
     /// Konum rozetinde gösterilecek metin.
     private var placeLabel: String {
@@ -208,6 +329,7 @@ struct ContentView: View {
         }
     }
 
+    @MainActor
     private func refreshLocationOnEntry() async {
         do {
             let location = try await locationManager.refreshCurrentLocation()
@@ -221,7 +343,6 @@ struct ContentView: View {
             // .task ve scenePhase aynı anda tetiklenirse ikinci isteği sessizce geç.
         } catch LocationError.permissionDenied {
             // İzin mesajını kullanıcı arama butonuna bastığında da görecek.
-            // Açılışta arka arkaya uyarı göstermiyoruz.
         } catch {
             // Geçici GPS hatası aramayı engellemez; butona basınca yeniden denenir.
         }
@@ -231,15 +352,19 @@ struct ContentView: View {
         switch phase {
         case .idle:      return "Bulmak için dokun"
         case .locating:  return "Konumunuz bulunuyor…"
-        case .searching: return "Nöbetçi eczaneler aranıyor…"
+        case .searching: return "Açık eczaneler aranıyor…"
         }
     }
+
+
+    // MARK: - Arama
 
     private func search() {
 
         guard phase == .idle else { return }
 
         errorMessage = nil
+        dutyNote = nil
 
         // Önce konum. Konum tam olarak gelmeden arama BAŞLAMAZ.
         phase = .locating
@@ -258,12 +383,38 @@ struct ContentView: View {
 
                 await MainActor.run { phase = .searching }
 
-                let found = try await service.fetchNearest(to: location)
+                // 1) Bugünün nöbetçileri.
+                var duty: [Pharmacy] = []
+                var note: String?
+
+                do {
+                    duty = try await service.fetchNearest(to: location)
+                } catch {
+                    note = error.localizedDescription
+                }
+
+                // 2) Mesai içindeyse yakındaki AÇIK eczaneler.
+                let open = await nearbyFinder.openNow(
+                    around: location,
+                    excluding: duty
+                )
 
                 await MainActor.run {
-                    pharmacies = found
-                    hasSearched = true
+
+                    dutyPharmacies = duty
+                    openPharmacies = open
+                    dutyNote = note
                     phase = .idle
+                    now = Date()
+                    lastSearch = Date()
+
+                    if duty.isEmpty && open.isEmpty {
+                        errorMessage = note
+                            ?? "Şu anda açık eczane bulunamadı. Birazdan tekrar dene."
+                        hasSearched = false
+                    } else {
+                        hasSearched = true
+                    }
                 }
 
             } catch {
@@ -275,6 +426,7 @@ struct ContentView: View {
         }
     }
 
+    @MainActor
     private func formattedDistance(_ pharmacy: Pharmacy) -> String? {
         guard let location = locationManager.location,
               let distance = pharmacy.distance(from: location) else {
@@ -285,27 +437,5 @@ struct ContentView: View {
             return "\(Int(distance.rounded())) m"
         }
         return String(format: "%.1f km", distance / 1000)
-    }
-
-    private func openMaps(_ pharmacy: Pharmacy) {
-        if let lat = pharmacy.latitude, let lon = pharmacy.longitude {
-            let item = MKMapItem(
-                placemark: MKPlacemark(
-                    coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon)
-                )
-            )
-            item.name = pharmacy.name
-            item.openInMaps(
-                launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving]
-            )
-            return
-        }
-
-        let query = (pharmacy.name + " " + pharmacy.address)
-            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-
-        if let url = URL(string: "http://maps.apple.com/?daddr=\(query)&dirflg=d") {
-            UIApplication.shared.open(url)
-        }
     }
 }

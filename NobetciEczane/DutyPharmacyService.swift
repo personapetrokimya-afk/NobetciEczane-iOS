@@ -13,6 +13,10 @@ struct DutyPharmacyService {
 
     // MARK: - Session
 
+    /// Tek paylaşılan örnek. SwiftUI görünümleri her yeniden çizimde yeniden
+    /// kurulduğu için her seferinde yeni bir URLSession açılıyordu.
+    static let shared = DutyPharmacyService()
+
     private let session: URLSession
 
     init() {
@@ -46,10 +50,14 @@ struct DutyPharmacyService {
 
     /// Uygulamanın ana akışı:
     /// 1. Telefonun güncel konumu alınır.
-    /// 2. Konumdan ŞEHİR belirlenir.
-    /// 3. O şehrin bugünkü nöbetçi listesi TÜM KAYNAKLARDAN paralel çekilip birleştirilir.
-    /// 4. Liste, telefona en yakın eczaneden en uzağa doğru sıralanıp döndürülür.
-    func fetchNearest(to location: CLLocation) async throws -> [Pharmacy] {
+    /// 2. Konumdan İL ve İLÇE belirlenir.
+    /// 3. O günün nöbetçi listesi TÜM KAYNAKLARDAN paralel çekilip çapraz doğrulanır.
+    /// 4. Nöbeti BİTMİŞ (artık kapalı) kayıtlar elenir.
+    /// 5. Liste, telefona en yakın eczaneden en uzağa sıralanır.
+    func fetchNearest(
+        to location: CLLocation,
+        limit: Int = 30
+    ) async throws -> [Pharmacy] {
 
         let placemark = try await reverseGeocode(location)
 
@@ -103,13 +111,22 @@ struct DutyPharmacyService {
             )
         }
 
-        log("✅ Kaynaklar: \(result.succeeded.joined(separator: ", ")) — \(result.pharmacies.count) kayıt")
+        // Nöbeti sona ermiş kayıt listeye ASLA girmez.
+        let active = result.pharmacies.filter {
+            PharmacyHours.isDutyStillActive(endsAt: $0.dutyEndsAt)
+        }
+
+        guard !active.isEmpty else {
+            throw ServiceError.dutyListNotPublished
+        }
+
+        log("✅ Kaynaklar: \(result.succeeded.joined(separator: ", ")) — \(active.count) nöbetçi")
 
         // Koordinatı hiçbir kaynaktan çıkmayan kayıtlar adresten tamamlanır.
-        let enriched = await enrichMissingCoordinates(result.pharmacies, city: city)
+        let enriched = await enrichMissingCoordinates(active, city: city)
 
-        // En yakından en uzağa.
-        return sort(enriched, around: location)
+        // En yakından en uzağa; uzaktaki onlarca kayıt listeyi boğmasın.
+        return Array(sort(enriched, around: location).prefix(limit))
     }
 
 
@@ -124,91 +141,6 @@ struct DutyPharmacyService {
         }
 
         return (city, detectDistrict(from: placemark))
-    }
-
-
-    // MARK: - Loading
-
-    func loadPharmacies(
-        city: String,
-        district: String?
-    ) async throws -> [Pharmacy] {
-
-        var lastError: ServiceError = .sourceUnavailable(detail: "bilinmiyor")
-
-        for url in candidateURLs(city: city, district: district) {
-
-            do {
-                let html = try await fetchHTML(from: url)
-
-                let todaySection = extractTodaySection(from: html)
-
-                var found = parseTableRows(
-                    from: todaySection,
-                    fallbackDistrict: district
-                )
-
-                if found.isEmpty {
-                    found = parseGenericBlocks(
-                        from: todaySection,
-                        fallbackDistrict: district
-                    )
-                }
-
-                log("💊 \(url.absoluteString) -> \(found.count) kayıt")
-
-                if !found.isEmpty {
-                    return removeDuplicates(found)
-                }
-
-                lastError = .noDutyPharmacyFound
-
-            } catch let error as ServiceError {
-                lastError = error
-                log("❌ \(url.absoluteString) -> \(error.diagnosticText)")
-            }
-        }
-
-        throw lastError
-    }
-
-
-    /// Aynı sayfa için denenecek adresler. İlki başarısızsa sıradaki denenir.
-    func candidateURLs(
-        city: String,
-        district: String?
-    ) -> [URL] {
-
-        let citySlug = slug(city)
-
-        var paths: [String] = []
-
-        if let district,
-           !district.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let districtSlug = slug(district)
-            if !districtSlug.isEmpty {
-                paths.append("nobetci-\(citySlug)-\(districtSlug)")
-            }
-        } else {
-            paths.append("nobetci-\(citySlug)")
-        }
-
-        let hosts = [
-            "https://www.eczaneler.gen.tr",
-            "https://eczaneler.gen.tr"
-        ]
-
-        var urls: [URL] = []
-
-        for path in paths {
-            for host in hosts {
-                if let url = URL(string: "\(host)/\(path)") {
-                    urls.append(url)
-                }
-            }
-        }
-
-        return urls
     }
 
 
@@ -278,104 +210,218 @@ struct DutyPharmacyService {
     }
 
 
-    // MARK: - Bugünkü nöbet bölümü
+    // MARK: - Bugünkü nöbet dönemi
 
-    /// Sayfada birden çok güne ait nöbet listesi bulunur; her dönem şu tarz bir
-    /// başlıkla ayrılır:
+    /// Sayfada birden çok güne ait nöbet listesi bulunur. Dönemler şu başlıklarla ayrılır:
     ///
-    ///   "19 Ağustos Çarşamba akşamından 20 Ağustos Perşembe sabahına kadar"
+    ///   "22 Ağustos C.tesi gününden 23 Ağustos Pazar sabahına kadar"
+    ///   "23 Ağustos Pazar gün boyu ve 24 Ağustos P.tesi sabahına kadar"
+    ///   "24 Ağustos P.tesi akşamından 25 Ağustos Salı sabahına kadar"
     ///
-    /// ÖNEMLİ: Doğru dönem, sayfadaki SIRAYA göre (ilk bölüm) değil, CİHAZ TARİHİNE
-    /// göre seçilir. Site listede dünü de yayınladığından "ilk bölüm = bugün"
-    /// varsayımı, sabahtan sonra DÜNKÜ nöbeti gösteriyordu. Bunun yerine başlıktaki
-    /// başlangıç tarihi, `currentDutyDateKey()` ile hesaplanan bugünün nöbet tarihine
-    /// eşleşen bölüm alınır. Eşleşme yoksa (sayfa o günü yayınlamıyorsa) ilk bölüme düşülür.
-    func extractTodaySection(from html: String) -> String {
+    /// ESKİ HATA: bölüm sınırı olarak yalnızca "akşam" kelimesi aranıyordu.
+    /// Cumartesi ("gününden") ve pazar ("gün boyu") başlıklarında bu kelime GEÇMEZ;
+    /// bu yüzden doğru bölüm bulunamıyor ve liste yanlış güne — çoğu zaman ERTESİ güne —
+    /// kayıyordu. Uygulamanın "nöbetçi olmayan / kapalı eczane gösterme" sorununun
+    /// asıl kaynağı buydu.
+    ///
+    /// YENİ KURAL: başlığın BAŞLANGIÇ tarihi okunur ve cihaz saatiyle (Türkiye saati,
+    /// sabah 09:00 devri) hesaplanan bugünün nöbet tarihine eşleşen bölüm alınır.
+    /// Eşleşme yoksa bölüm DÖNMEZ — yanlış günün listesini göstermektense hiç
+    /// göstermemek doğrudur; diğer kaynaklar devreye girer.
 
-        let markers = ranges(of: #"(?i)akşam"#, in: html)
+    struct DutySectionMatch {
+        let html: String
+        let dutyDate: Date
+        let endsAt: Date?
 
-        guard !markers.isEmpty else {
-            return firstTableWithRows(in: html) ?? html
-        }
+        /// Bölüm, sayfadaki BUGÜNE ait dönem başlığıyla eşleşerek mi bulundu?
+        /// `false` ise sayfada dönem başlığı yoktur; günün doğruluğu ayrıca
+        /// (sayfada bugünün tarihi geçiyor mu diye) sınanmalıdır.
+        let matchedPeriod: Bool
+    }
 
-        // Her dönem başlığının anahtarını ("19 agustos") ve sayfadaki başlangıç
-        // konumunu topla. Sayfada birden çok güne ait liste bulunur; hangisinin
-        // BUGÜN geçerli olduğunu SAYFADAKİ SIRAYA göre değil, CİHAZ TARİHİNE göre
-        // seçeriz. Eski davranış "ilk bölüm = bugün" varsayıyordu; site listede
-        // dünü de yayınladığı için sabahtan sonra DÜNKÜ nöbeti gösteriyordu.
-        struct DutySection {
-            var key: String
-            var start: String.Index
-        }
-
-        var sections: [DutySection] = []
-
-        for marker in markers {
-
-            let windowStart = html.index(
-                marker.lowerBound,
-                offsetBy: -160,
-                limitedBy: html.startIndex
-            ) ?? html.startIndex
-
-            let key = periodKey(from: String(html[windowStart..<marker.lowerBound]))
-
-            // Aynı dönem başlığı birden çok tabloda tekrar edebilir; yalnızca
-            // anahtarın DEĞİŞTİĞİ noktaları yeni bölüm sınırı sayarız.
-            if let last = sections.last, last.key == key {
-                continue
-            }
-
-            sections.append(DutySection(key: key, start: windowStart))
-        }
-
-        guard !sections.isEmpty else {
-            return firstTableWithRows(in: html) ?? html
-        }
-
-        // Bir bölümün gövdesi: kendi başlangıcından bir sonraki bölümün başlangıcına.
-        func body(at index: Int) -> String {
-            let start = sections[index].start
-            let end = index + 1 < sections.count ? sections[index + 1].start : html.endIndex
-            return String(html[start..<end])
-        }
-
-        // 1) Cihaz tarihine (İstanbul saati + sabah devri) denk gelen dönemi seç.
-        let targetKey = currentDutyDateKey()
-
-        if !targetKey.isEmpty,
-           let index = sections.firstIndex(where: { $0.key == targetKey }) {
-            return body(at: index)
-        }
-
-        // 2) Tarih eşleşmezse (sayfa o günü henüz/artık yayınlamıyorsa) ilk dönem.
-        return body(at: 0)
+    /// Sayfadaki nöbet dönemi başlıklarının anahtarı ve konumu.
+    struct DutyPeriodMarker {
+        let key: String            // "23 agustos"
+        let start: String.Index
     }
 
 
-    /// Cihaz saatine göre BUGÜN geçerli olan nöbet döneminin başlangıç tarihini
-    /// "20 agustos" biçiminde (periodKey ile aynı normalizasyon) döndürür.
-    ///
-    /// Nöbet "akşamından sabahına" sürdüğü için sabah devir saatinden ÖNCE hâlâ
-    /// dün akşam başlayan nöbet geçerlidir; bu yüzden erken saatlerde hedef tarih
-    /// bir gün geri alınır. Böylece gece 03:00'te de doğru (o an açık olan) nöbet
-    /// bölümü seçilir.
-    func currentDutyDateKey(now: Date = Date()) -> String {
+    func dutyPeriodMarkers(in html: String) -> [DutyPeriodMarker] {
 
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Europe/Istanbul") ?? .current
+        let months =
+            "Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|"
+            + "Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık"
 
-        // Türkiye'de nöbet HER GÜN SABAH 09:00'da devredilir. 09:00'dan önce
-        // hâlâ dün akşam başlayan nöbet geçerlidir.
-        let handoverHour = 9
-        let hour = calendar.component(.hour, from: now)
+        // Bir DÖNEM BAŞLANGICI: tarih + (gün adı) + dönem kelimesi.
+        // Dönem SONU ("… sabahına kadar") bilerek eşleşmez; yoksa bölüm sınırı
+        // bir gün ileri kayardı.
+        let pattern =
+            "(?i)(\\d{1,2})\\s*(?:&nbsp;|\\s)*(" + months + ")"
+            + "(?:\\s*\\d{4})?"
+            + "[^0-9<>]{0,24}?"
+            + "(gününden|akşamından|gecesinden|gün boyu|gün boyunca|günü boyunca)"
 
-        let target = hour < handoverHour
-            ? (calendar.date(byAdding: .day, value: -1, to: now) ?? now)
-            : now
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
 
-        let day = calendar.component(.day, from: target)
-        let month = calendar.component(.month, from: target)
+        var markers: [DutyPeriodMarker] = []
+
+        for match in regex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+
+            guard match.numberOfRanges >= 3,
+                  let full = Range(match.range, in: html),
+                  let dayRange = Range(match.range(at: 1), in: html),
+                  let monthRange = Range(match.range(at: 2), in: html)
+            else { continue }
+
+            // "03 Eylül" ile "3 Eylül" aynı gündür: baştaki sıfır atılır.
+            let day = Int(html[dayRange]) ?? -1
+            let key = normalize("\(day) \(html[monthRange])")
+
+            guard !key.isEmpty else { continue }
+
+            // Aynı dönem başlığı sayfada birden çok kez geçebilir;
+            // yalnızca anahtarın DEĞİŞTİĞİ yerler yeni bölüm sınırıdır.
+            if let last = markers.last, last.key == key { continue }
+
+            markers.append(DutyPeriodMarker(key: key, start: full.lowerBound))
+        }
+
+        return markers
+    }
+
+
+    /// Bugünün nöbet dönemine ait HTML bölümü.
+    /// Sayfa dönem başlığı kullanıyor ama BUGÜNÜ yayınlamıyorsa `nil` döner.
+    func todayDutySection(from html: String, now: Date = Date()) -> DutySectionMatch? {
+
+        let dutyDate = PharmacyHours.currentDutyDate(now)
+        let targetKey = dutyDateKey(for: dutyDate)
+        let endsAt = PharmacyHours.dutyEnd(forDutyDate: dutyDate)
+
+        let markers = dutyPeriodMarkers(in: html)
+
+        guard !markers.isEmpty else {
+
+            // Sayfada dönem başlığı yok. Bu sayfalar genelde yalnızca bugünü
+            // yayınlar; yine de `matchedPeriod = false` ile işaretlenir ve
+            // çağıran taraf günü sayfadaki tarihten doğrular.
+            return DutySectionMatch(
+                html: firstTableWithRows(in: html) ?? html,
+                dutyDate: dutyDate,
+                endsAt: endsAt,
+                matchedPeriod: false
+            )
+        }
+
+        // Aynı başlık sayfa başlığında / meta alanında da geçebildiği için
+        // hedef anahtarla eşleşen TÜM adaylar denenir; içinde gerçekten
+        // eczane kaydı olan ilk bölüm alınır.
+        let candidates = markers.indices.filter { markers[$0].key == targetKey }
+
+        guard !candidates.isEmpty else {
+            log("🚫 Bugünün dönemi (\(targetKey)) sayfada yok: \(markers.map(\.key))")
+            return nil
+        }
+
+        var firstBody: String?
+
+        for index in candidates {
+
+            let start = markers[index].start
+            let end = index + 1 < markers.count ? markers[index + 1].start : html.endIndex
+
+            let body = trimFooter(String(html[start..<end]))
+
+            if firstBody == nil { firstBody = body }
+
+            if !extractPharmacies(from: body, fallbackDistrict: nil).isEmpty {
+                return DutySectionMatch(
+                    html: body,
+                    dutyDate: dutyDate,
+                    endsAt: endsAt,
+                    matchedPeriod: true
+                )
+            }
+        }
+
+        return DutySectionMatch(
+            html: firstBody ?? html,
+            dutyDate: dutyDate,
+            endsAt: endsAt,
+            matchedPeriod: true
+        )
+    }
+
+
+    /// Sayfa BUGÜNÜN tarihini yazıyor mu?
+    /// Dönem başlığı olmayan kaynaklarda günün doğruluğu böyle sınanır;
+    /// tarihi yazmayan bir kaynak listeyi TEK BAŞINA kuramaz.
+    func pageMentionsToday(_ html: String, now: Date = Date()) -> Bool {
+
+        let calendar = PharmacyHours.calendar
+        let dutyDate = PharmacyHours.currentDutyDate(now)
+
+        let day = calendar.component(.day, from: dutyDate)
+        let month = calendar.component(.month, from: dutyDate)
+        let year = calendar.component(.year, from: dutyDate)
+
+        // Tarih sayfanın üst bölümünde yazar; tüm sayfayı normalize etmek pahalıdır.
+        let text = normalize(String(html.prefix(60_000)))
+
+        var needles = [dutyDateKey(for: dutyDate)]                    // "23 agustos"
+
+        needles.append("\(day) \(month) \(year)")                   // 23.08.2026
+        needles.append(String(format: "%02d %02d %d", day, month, year))
+        needles.append("\(year) \(month) \(day)")                   // 2026-08-23
+        needles.append(String(format: "%d %02d %02d", year, month, day))
+
+        return needles.contains { !$0.isEmpty && text.contains($0) }
+    }
+
+
+    /// Son dönemin gövdesi sayfa sonuna kadar uzanır; altbilgideki
+    /// "24 Saat Açık Eczane", "Sık Sorulan Sorular" gibi başlıklar listeye
+    /// sızmasın diye altbilgi kesilir.
+    func trimFooter(_ section: String) -> String {
+
+        let markers = [
+            #"(?is)<footer\b"#,
+            #"(?i)Sık Sorulan"#,
+            #"(?i)Yayın Künyesi"#
+        ]
+
+        // Kesme noktası bölümün en az 200 karakter içinde olmalı; başlığın hemen
+        // altındaki bir bağlantı yüzünden tüm bölüm silinmesin.
+        guard let minimum = section.index(
+            section.startIndex,
+            offsetBy: 200,
+            limitedBy: section.endIndex
+        ) else {
+            return section
+        }
+
+        var cut = section.endIndex
+
+        for pattern in markers {
+            for range in ranges(of: pattern, in: section)
+            where range.lowerBound >= minimum && range.lowerBound < cut {
+                cut = range.lowerBound
+                break
+            }
+        }
+
+        return String(section[section.startIndex..<cut])
+    }
+
+
+    /// "23 agustos" biçiminde dönem anahtarı.
+    func dutyDateKey(for date: Date) -> String {
+
+        let calendar = PharmacyHours.calendar
+
+        let day = calendar.component(.day, from: date)
+        let month = calendar.component(.month, from: date)
 
         let months = [
             "", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
@@ -385,26 +431,6 @@ struct DutyPharmacyService {
         guard month >= 1, month <= 12 else { return "" }
 
         return normalize("\(day) \(months[month])")
-    }
-
-
-    /// "… 19 Ağustos Çarşamba " parçasından "19 agustos" anahtarını çıkarır.
-    func periodKey(from fragment: String) -> String {
-
-        let text = cleanHTML(fragment)
-            .replacingOccurrences(of: "\n", with: " ")
-
-        let months =
-            "Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|"
-            + "Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık"
-
-        let pattern = "(\\d{1,2}\\s+(?:" + months + "))[^0-9]*$"
-
-        guard let match = firstMatch(pattern, in: text) else {
-            return ""
-        }
-
-        return normalize(match)
     }
 
 
@@ -445,8 +471,9 @@ struct DutyPharmacyService {
         fallbackDistrict: String?
     ) -> [Pharmacy] {
 
+        // (?i): "ÖZLEM ECZANESİ" gibi tamamı büyük harf yazan kaynaklar da okunmalı.
         guard let regex = try? NSRegularExpression(
-            pattern: #">\s*([^<>{}]{2,60}?[EeİiIı]czanesi)\s*<"#
+            pattern: #"(?i)>\s*([^<>{}]{2,60}?[EeİiIı]czanes[iİIı])\s*<"#
         ) else {
             return []
         }
@@ -456,7 +483,9 @@ struct DutyPharmacyService {
 
         let fullRange = NSRange(html.startIndex..., in: html)
 
-        for match in regex.matches(in: html, range: fullRange) {
+        let matches = regex.matches(in: html, range: fullRange)
+
+        for (index, match) in matches.enumerated() {
 
             guard match.numberOfRanges >= 2,
                   let nameRange = Range(match.range(at: 1), in: html),
@@ -469,11 +498,20 @@ struct DutyPharmacyService {
 
             guard isValidDutyPharmacyName(name) else { continue }
 
-            let windowEnd = html.index(
+            // Pencere EN FAZLA bir sonraki eczane adına kadar uzanır; yoksa bir kaydın
+            // adresi/telefonu komşu kayda karışıyordu (kullanıcı yanlış adrese gidiyordu).
+            var windowEnd = html.index(
                 matchRange.upperBound,
                 offsetBy: 1800,
                 limitedBy: html.endIndex
             ) ?? html.endIndex
+
+            if index + 1 < matches.count,
+               let nextStart = Range(matches[index + 1].range, in: html)?.lowerBound,
+               nextStart > matchRange.upperBound,
+               nextStart < windowEnd {
+                windowEnd = nextStart
+            }
 
             let window = String(html[matchRange.upperBound..<windowEnd])
 
@@ -858,9 +896,11 @@ struct DutyPharmacyService {
 
     func extractDistrict(_ raw: String, text: String) -> String? {
 
+        // Bağlantı, kaydın KENDİ bloğunun başında olmalı; ilerideki
+        // "diğer ilçeler" menüsü kayda yanlış ilçe yazıyordu.
         if let match = firstMatch(
             #"(?is)<a[^>]+href=["'][^"']*nobetci-[a-z0-9\-]+-([a-z0-9\-]+)["']"#,
-            in: raw
+            in: String(raw.prefix(600))
         ) {
             let value = match.replacingOccurrences(of: "-", with: " ")
             if value.count >= 3 { return value.capitalized }
@@ -1057,7 +1097,10 @@ struct DutyPharmacyService {
                             latitude: coordinate.latitude,
                             longitude: coordinate.longitude,
                             district: pharmacy.district,
-                            sources: pharmacy.sources
+                            sources: pharmacy.sources,
+                            kind: pharmacy.kind,
+                            dutyEndsAt: pharmacy.dutyEndsAt,
+                            closesAt: pharmacy.closesAt
                         )
                     )
                 } else {
@@ -1357,19 +1400,28 @@ extension DutyPharmacyService {
             )
         }
 
+        // Nöbeti sona ermiş (artık kapalı) kayıt listeye ASLA girmez.
+        let active = result.pharmacies.filter {
+            PharmacyHours.isDutyStillActive(endsAt: $0.dutyEndsAt)
+        }
+
+        guard !active.isEmpty else {
+            throw ServiceError.dutyListNotPublished
+        }
+
         // Bazı kaynaklar ilçe sayfası sunmadığı için il listesi döner;
         // ilçe istendiyse burada süzülür.
         if let districtName,
            !districtName.isEmpty {
 
-            let narrowed = filter(result.pharmacies, byDistrict: districtName)
+            let narrowed = filter(active, byDistrict: districtName)
 
             if !narrowed.isEmpty {
                 return narrowed
             }
         }
 
-        return result.pharmacies
+        return active
     }
 
 
@@ -1464,6 +1516,7 @@ enum ServiceError: LocalizedError {
     case sourceUnavailable(detail: String)
     case invalidResponse
     case noDutyPharmacyFound
+    case dutyListNotPublished
     case districtsNotFound
 
     var diagnosticText: String {
@@ -1473,6 +1526,7 @@ enum ServiceError: LocalizedError {
         case .sourceUnavailable(let detail): return detail
         case .invalidResponse:      return "yanıt okunamadı"
         case .noDutyPharmacyFound:  return "listede kayıt yok"
+        case .dutyListNotPublished: return "bugünün nöbet listesi yayınlanmamış"
         case .districtsNotFound:    return "ilçe listesi okunamadı"
         }
     }
@@ -1500,6 +1554,15 @@ enum ServiceError: LocalizedError {
 
         case .noDutyPharmacyFound:
             return "Bu bölgede bugün için yayınlanmış nöbetçi eczane bulunamadı."
+
+        case .dutyListNotPublished:
+            return """
+            Bugünün (\(Date().formatted(date: .abbreviated, time: .omitted))) nöbet listesi \
+            kaynaklarda henüz yayınlanmamış görünüyor.
+
+            Yanlış güne ait liste göstermemek için bu kayıtlar gizlendi. \
+            Birazdan tekrar deneyebilir ya da 182 ALO Sağlık Hattı'nı arayabilirsin.
+            """
 
         case .districtsNotFound:
             return "İlçe listesi alınamadı. İnternet bağlantını kontrol edip tekrar dene."
